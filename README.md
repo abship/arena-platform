@@ -132,6 +132,80 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **No integration tests.** CI runs typecheck, build, and mocked unit tests. No end-to-end test of deposit → match → payout flow against a real database.
 - **Node 20 action deprecated June 2026.** .github/workflows/ci.yml uses actions/checkout@v4 and actions/setup-node@v4 on node-version: 20. GitHub will force Node 24 by June 2, 2026. Bump to 24 before then.
 
+## Build Roadmap
+
+Realistic path from today to MVP-deployable. Each phase assumes one developer (Arjun) with two AI coding agents (Claude Code, Codex) running in parallel per CLAUDE.md territory rules.
+
+### Phase 1 — Platform Core (in progress, ~30% done)
+
+**Done:** packages/shared, packages/database, packages/wallet (Codex-approved after 3 audit rounds)
+
+**Remaining (~5-8 agent sessions):**
+1. packages/payments — PaymentProvider interface + FakePaymentProvider (Claude Code, ~30 min)
+2. packages/kyc — KYCService interface + FakeKYCProvider (Claude Code, ~30 min)
+3. packages/geolocation — GeoService interface + MaxMindProvider + FakeGeoProvider (Claude Code, ~45 min)
+4. packages/matchmaking — ELO ratings, queue, skill-based pairing (Claude Code, ~60-90 min, Codex audit recommended — money-adjacent)
+5. servers/api — REST endpoints, JWT auth, zod validation (Codex, Stage 2, ~2-3 hou/websocket — Socket.io gateway for real-time games (Codex, ~60 min)
+7. servers/game-server — engine base classes (Real-time, Turn-based, Algorithm, Parallel) (Claude Code, ~2-3 hours)
+8. Integration test — full flow: signup → provision wallet → deposit → queue → match → play → resolve → payout (run end-to-end against local Postgres + fake providers)
+
+**Phase 1 milestone:** platform core works end-to-end with fake money, no games yet.
+
+### Phase 2 — First Game + Frontend (~2-3 days)
+
+- apps/web — Next.js frontend, landing page, game browser, wallet UI, profile, leaderboards (Claude Code via V0 MCP)
+- games/agario — first playable game (server + client, Pixi.js). Reference pattern for all other games. (Codex for client, Claude Code for server extending RealTimeGameServer)
+
+**Phase 2 milestone:** one game is fully playable in a real browser against fake money, with the full UI built out.
+
+### Phase 3 — Remaining 23 Games (~5-10 days)
+
+- Engine A games (Claude Code): slitherio, diep,ker last — 3D Three.js, most complex)
+- Engine B games (Codex): poker, blackjack, spades, rummy, war, skill-cards
+- Engine C games (Claude Code): plinko, crash, mines, dice, wheel, coinflip
+- Engine D games (Codex): tetris-duel, speed-math, trivia, typing-race, pattern-match, word-game
+- Many can run as cloud tasks kicked off from phone — each game is an isolated folder, zero conflict
+
+**Phase 3 milestone:** all 24 games are fully functional against fake money.
+
+### Phase 4 — Integration, Review, Beta Deploy (~2-3 days)
+
+- Cross-agent review: Claude Code audits Codex money logic; Codex audits Claude Code money logic
+- Dockerfiles + Railway deployment configuration
+- Sentry error monitoring, PostHog analytics integration
+- Swap fake → real providers via env vars: MaxMind (geo), Resend (email), etc. Payment providers and KYC stay fake until post-beta.
+- Deploy to Railway with fake money enabled
+- Friends playtest
+
+**Phase 4 milestone:** Arena.gg is live on a real URL with fake money. This is where "aldev done, plugging in APIs next" kicks in.
+
+### Post-Beta — Real Money Operations (wall-clock measured in weeks, most waiting on external approvals)
+
+- US skill-gaming attorney opinion letter (~$5-15K, 4-8 weeks)
+- Business bank account: Relay or Grasshopper (1-3 days)
+- BitPay merchant application (5-7 days approval)
+- Paysafe / Nuvei card processor applications (2-6 weeks)
+- Jumio KYC integration (2-4 weeks)
+- Swap FakePaymentProvider → BitPay/Helius/Coinbase Commerce/NOWPayments
+- Swap FakeKYCProvider → Jumio
+- Enable Tier 1/2 games in unrestricted US states
+- Curaçao license application (~$14K, 6-10 weeks)
+- Malta MGA + Isle of Man in parallel after Curaçao approval
+- UKGC after Isle of Man approval
+
+**Post-beta milestone:** Arena.gg accepts real money from US players for Tier 1/2 skill games. International launch with broader tiers when Curaçao approves.
+
+### Rough Calendar Estimate
+
+- Phase 1 complete: ~1 week from today
+- Phase 2 complete: ~1.5 weeks from today
+- Phase 3 complete: ~3 weeks f (depends on parallel cloud task throughput)
+- Phase 4 beta deployed: ~3-4 weeks from today
+- First real-money revenue (US skill games): ~2-3 months from today
+- Global launch with Curaçao: ~4-6 months from today
+
+These estimates assume daily work, functioning AI agents, no major rewrites, and no life stuff derailing momentum. Half those assumptions will break; pad accordingly.
+
 ## Notes
 
 - Planning happens in claude.ai chats (within the Arena.gg project). Execution happens in Cursor terminal with Claude Code and Codex. README.md is the living memory between planning chats and agent sessions.

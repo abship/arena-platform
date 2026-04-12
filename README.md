@@ -5,8 +5,8 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 ## Current Status
 
 **Phase:** Phase 1 — Platform Core
-**Last updated:** 2026-04-11
-**Build status:** packages/shared/, packages/database/, and packages/wallet/ complete and stable. Wallet finalized after 3 Codex audit rounds. Ready for packages/payments/.
+**Last updated:** 2026-04-12
+**Build status:** packages/shared/, packages/database/, and packages/wallet/ complete and stable. Wallet approved after 3 Codex audit rounds. Ready for packages/payments/.
 
 ## What's Built
 

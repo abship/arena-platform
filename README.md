@@ -22,7 +22,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 ## Next Up
 
-1. packages/shared/ — all TypeScript tyerfaces, enums, constants, error classes (Claude Code)
+1. packages/shared/ — all TypeScript types, interfaces, enums, constants, error classes (Claude Code)
 2. packages/database/ — Prisma schema + migrations (Codex, after shared is done)
 3. packages/wallet/ — double-entry bookkeeping (Claude Code)
 4. packages/payments/ with FakePaymentProvider (Claude Code)
@@ -40,7 +40,7 @@ None.
 
 ### Entity & Legal
 
-- **Care C-Corp via Stripe Atlas — formation complete
+- **C-Corp:** Delaware C-Corp via Stripe Atlas — formation complete
 - **EIN:** received (CP 575 letter downloaded)
 - **83(b) election:** filed by Atlas on 2026-04-10 via USPS certified mail, tracking 9207190235890900003860​7398, expected IRS delivery 2026-04-15, tracking screenshot saved
 - **Bylaws, board consent, stock certificate:** completed via Atlas
@@ -56,7 +56,7 @@ None.
 ### Banking
 
 - **Mercury:** not usable (Mercury prohibits internet gaming in ToS)
-- **Current plan:** operating on personal card during build phase; migrate to Arena.gg-owned business bank account (Relay, Grasshopper, or Chase) at launch prep, before applying to any payment processor. Pre-banking expensell be reimbursed as founder loan per standard CPA process.
+- **Current plan:** operating on personal card during build phase; migrate to Arena.gg-owned business bank account (Relay, Grasshopper, or Chase) at launch prep, before applying to any payment processor. Pre-banking expenses will be reimbursed as founder loan per standard CPA process.
 - **Stripe account from Atlas:** exists but unused — Stripe prohibits skill games with prizes, will not be used for player payments
 
 ### Accounts Active Now
@@ -77,7 +77,8 @@ Sign up in the moment the agent needs the API key during integration. No point s
 
 - **MaxMind GeoLite2** — sign up when building packages/geolocation/ real provider
 - **Sentry** — sign up when deploying beta and wanting real error monitoring
-- **PostHog** — sign up when building the website andesend** — sign up when building real transactional email (verification, match notifications)
+- **PostHog** — sign up when building the website and wanting analytics
+- **Resend** — sign up when building real transactional email (verification, match notifications)
 - **Cloudflare** — sign up when moving DNS for arenagaming.gg before beta deploy
 - **Fly.io** — sign up at production deploy time (beta stays on Railway)
 - **Upstash Redis** — sign up when in-memory queues need to survive server restarts
@@ -92,7 +93,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **Jumio** — after beta, KYC vendor wants integration context
 - **GeoComply, Xpoint** — after gaming license application started, enterprise sales
 - **Elliptic** — when processing real crypto volume
-ze CPA** — when real expenses justify bookkeeping
+- **Bench, Pilot, or Kruze CPA** — when real expenses justify bookkeeping
 - **Ifrah Law, Walters Law Group intro calls** — after beta deployed, when there's a product to describe
 - **Business bank account (Relay / Grasshopper / Chase)** — at launch prep before applying to payment processors
 
@@ -109,7 +110,7 @@ ze CPA** — when real expenses justify bookkeeping
 ## Key Decisions
 
 - **2026-04-09:** Tech stack locked per CLAUDE.md. Fake-then-swap architecture for all external providers.
-- **2026-04-09:** Phased build plan — Claude C 1 (Days 1–10); both agents in opposite zones from Phase 2 onward.
+- **2026-04-09:** Phased build plan — Claude Code builds platform core alone in Phase 1 (Days 1–10); both agents in opposite zones from Phase 2 onward.
 - **2026-04-11:** 83(b) filed by Atlas. EIN received. Formation complete.
 - **2026-04-11:** Mercury rejected as banking option — Mercury ToS prohibits gaming. Banking decision deferred to launch prep.
 - **2026-04-11:** Account signup strategy = ad-hoc, in the moment each integration needs the API key. No premature signups.

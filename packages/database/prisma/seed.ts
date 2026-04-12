@@ -470,15 +470,42 @@ async function seedJurisdictions(): Promise<number> {
   return count;
 }
 
+// Mirrors provisionSystemWallets() from @arena/wallet.
+// Inlined here because @arena/wallet depends on @arena/database (circular dep).
+const SYSTEM_WALLET_USERS = [
+  { id: 'SYSTEM_PLATFORM_SUSPENSE', email: 'system_platform_suspense@system.arena.gg', username: 'SYSTEM_PLATFORM_SUSPENSE' },
+  { id: 'SYSTEM_MATCH_POOL', email: 'system_match_pool@system.arena.gg', username: 'SYSTEM_MATCH_POOL' },
+  { id: 'SYSTEM_PLATFORM_REVENUE', email: 'system_platform_revenue@system.arena.gg', username: 'SYSTEM_PLATFORM_REVENUE' },
+] as const;
+
+async function seedSystemWallets(): Promise<number> {
+  let count = 0;
+  for (const su of SYSTEM_WALLET_USERS) {
+    await prisma.user.upsert({
+      where: { id: su.id },
+      create: { id: su.id, email: su.email, username: su.username, country: 'SYSTEM' },
+      update: {},
+    });
+    await prisma.wallet.upsert({
+      where: { userId: su.id },
+      create: { userId: su.id, balanceCents: 0n, currency: 'USD' },
+      update: {},
+    });
+    count += 1;
+  }
+  return count;
+}
+
 async function main(): Promise<void> {
   const gamesCount = await seedGames();
   const jurisdictionsCount = await seedJurisdictions();
+  const systemWalletsCount = await seedSystemWallets();
 
   console.log(
     [
       `Seeded ${gamesCount} games.`,
       `Seeded ${jurisdictionsCount} jurisdiction rules.`,
-      'No users or wallets were created; those are provisioned at signup time.',
+      `Provisioned ${systemWalletsCount} system wallets (platform_suspense, match_pool, platform_revenue).`,
     ].join(' '),
   );
 }

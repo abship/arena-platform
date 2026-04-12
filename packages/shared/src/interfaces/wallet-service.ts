@@ -48,12 +48,14 @@ export interface WalletService {
    * @param userId - The user requesting the withdrawal
    * @param amountCents - Amount to withdraw in USD cents
    * @param method - Payment method for the withdrawal
+   * @param idempotencyKey - Optional key to prevent duplicate withdrawals (stored as referenceId)
    * @returns The created transaction record
    */
   withdraw(
     userId: UserId,
     amountCents: Money,
     method: string,
+    idempotencyKey?: string,
   ): Promise<Transaction>;
 
   /**
@@ -80,6 +82,19 @@ export interface WalletService {
     userId: UserId,
     matchId: MatchId,
     amountCents: Money,
+  ): Promise<Transaction>;
+
+  /**
+   * Record platform rake from a resolved match.
+   * Ledger: debit match_pool, credit platform_revenue.
+   * Called by matchmaking after a match resolves, before/with prize payouts.
+   * @param matchId - The resolved match
+   * @param rakeCents - Rake amount in USD cents
+   * @returns The created transaction record
+   */
+  collectRake(
+    matchId: MatchId,
+    rakeCents: Money,
   ): Promise<Transaction>;
 
   /**

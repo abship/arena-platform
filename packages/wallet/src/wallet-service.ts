@@ -6,23 +6,31 @@
  * The sum of debitCents must always equal the sum of creditCents per transaction.
  * This invariant is enforced in code before writing to the database.
  *
- * SYSTEM WALLETS:
- * Two "system" wallets serve as double-entry counterparties:
- * - PLATFORM_SUSPENSE: Represents external money entering/leaving the platform.
- *   Deposits debit this wallet; withdrawals credit it.
- * - MATCH_POOL: Represents money held in active matches.
- *   Entry fees credit this wallet; prizes debit it.
+ * SYSTEM WALLETS (pre-provisioned via WalletServiceImpl.create()):
+ * - PLATFORM_SUSPENSE: External money gateway. Deposits debit it; withdrawals credit it.
+ * - MATCH_POOL: Money in active matches. Entry fees credit it; prizes/rake debit it.
+ * - PLATFORM_REVENUE: Accumulated rake. collectRake credits it.
  *
- * These are created lazily on first use with synthetic user IDs. Concurrent
- * initialization is safe because User.id and Wallet.userId have unique constraints —
- * the upsert pattern ensures exactly one system wallet per type.
+ * System wallets are provisioned once at startup via provisionSystemWallets(),
+ * called by the static factory method create(). No system-wallet provisioning
+ * code runs inside hot-path money transactions.
+ *
+ * DOUBLE-SIDED POSTING:
+ * Both the user wallet AND the corresponding system wallet have their balanceCents
+ * updated in every money operation. This ensures system wallet balances are accurate
+ * and prevents paying out more than was collected.
  *
  * CONCURRENCY CONTROL:
  * - Every money-mutating operation runs inside a Prisma interactive transaction
  *   with SERIALIZABLE isolation level.
- * - Wallet.version is used for optimistic locking: reads the current version,
- *   includes it in the WHERE clause on update, increments it, and rejects
- *   (ConflictError) if zero rows were affected.
+ * - Wallet.version is used for optimistic locking on both user and system wallets.
+ *
+ * IDEMPOTENCY:
+ * - deposit() checks Transaction.referenceId (unique) before creating a new record.
+ * - withdraw() accepts optional idempotencyKey stored as referenceId.
+ *
+ * ERROR MAPPING:
+ * - Prisma errors are mapped to typed AppError subclasses via prisma-error-mapper.
  *
  * @module
  */
@@ -46,12 +54,7 @@ import {
   InsufficientFundsError,
   ConflictError,
 } from '@arena/shared';
-
-/** System user ID for the platform suspense wallet (external money gateway). */
-const SYSTEM_PLATFORM_SUSPENSE_USER_ID = 'SYSTEM_PLATFORM_SUSPENSE' as UserId;
-
-/** System user ID for the match pool wallet (money in active matches). */
-const SYSTEM_MATCH_POOL_USER_ID = 'SYSTEM_MATCH_POOL' as UserId;
+import { mapPrismaError } from './prisma-error-mapper.js';
 
 /** Maximum page size for transaction history queries. */
 const MAX_PAGE_LIMIT = 100;
@@ -151,10 +154,6 @@ export function mapWallet(record: {
 /**
  * Validate and create double-entry ledger entries for a transaction.
  * Enforces the invariant: sum(debitCents) === sum(creditCents).
- *
- * @param tx - Prisma transaction client
- * @param transactionId - The parent transaction ID
- * @param entries - Array of debit/credit entry inputs
  */
 async function createBalancedLedgerEntries(
   tx: TxClient,
@@ -184,11 +183,6 @@ async function createBalancedLedgerEntries(
 /**
  * Update a wallet balance with optimistic locking.
  * Throws ConflictError if the version has changed since the wallet was read.
- *
- * @param tx - Prisma transaction client
- * @param walletId - The wallet to update
- * @param currentVersion - Expected version (read earlier in same transaction)
- * @param newBalanceCents - New balance to set
  */
 async function updateWalletWithOptimisticLock(
   tx: TxClient,
@@ -212,78 +206,56 @@ async function updateWalletWithOptimisticLock(
   }
 }
 
+/** Configuration for WalletServiceImpl constructor. */
+export interface WalletServiceConfig {
+  readonly platformSuspenseWalletId: string;
+  readonly matchPoolWalletId: string;
+  readonly platformRevenueWalletId: string;
+}
+
 /**
  * Implementation of the WalletService interface using Prisma with
- * serializable transactions, optimistic locking, and double-entry bookkeeping.
+ * serializable transactions, optimistic locking, double-entry bookkeeping,
+ * double-sided system wallet posting, and idempotency via unique referenceId.
  */
 export class WalletServiceImpl implements WalletService {
-  private platformSuspenseWalletId: string | null = null;
-  private matchPoolWalletId: string | null = null;
+  private readonly platformSuspenseWalletId: string;
+  private readonly matchPoolWalletId: string;
+  private readonly platformRevenueWalletId: string;
 
   /**
-   * Ensure a system wallet exists, creating the system user and wallet if needed.
-   * Uses upsert for the user and findUnique+create for the wallet.
-   * Cached after first successful lookup/creation.
+   * Construct with pre-provisioned system wallet IDs.
+   * Prefer WalletServiceImpl.create() unless you already know the IDs.
+   *
+   * @param config - System wallet IDs from provisionSystemWallets()
    */
-  private async ensureSystemWallet(
-    tx: TxClient,
-    systemUserId: string,
-    cachedId: string | null,
-  ): Promise<string> {
-    if (cachedId) {
-      return cachedId;
-    }
-
-    const existing = await tx.wallet.findUnique({
-      where: { userId: systemUserId },
-    });
-    if (existing) {
-      return existing.id;
-    }
-
-    await tx.user.upsert({
-      where: { id: systemUserId },
-      create: {
-        id: systemUserId,
-        email: `${systemUserId.toLowerCase()}@system.arena.gg`,
-        username: systemUserId,
-        country: 'SYSTEM',
-      },
-      update: {},
-    });
-
-    const wallet = await tx.wallet.create({
-      data: {
-        userId: systemUserId,
-        balanceCents: BigInt(0),
-        currency: 'USD',
-      },
-    });
-
-    return wallet.id;
+  constructor(config: WalletServiceConfig) {
+    this.platformSuspenseWalletId = config.platformSuspenseWalletId;
+    this.matchPoolWalletId = config.matchPoolWalletId;
+    this.platformRevenueWalletId = config.platformRevenueWalletId;
   }
 
-  private async getPlatformSuspenseWalletId(tx: TxClient): Promise<string> {
-    const id = await this.ensureSystemWallet(
-      tx,
-      SYSTEM_PLATFORM_SUSPENSE_USER_ID,
-      this.platformSuspenseWalletId,
-    );
-    this.platformSuspenseWalletId = id;
-    return id;
-  }
-
-  private async getMatchPoolWalletId(tx: TxClient): Promise<string> {
-    const id = await this.ensureSystemWallet(
-      tx,
-      SYSTEM_MATCH_POOL_USER_ID,
-      this.matchPoolWalletId,
-    );
-    this.matchPoolWalletId = id;
-    return id;
+  /**
+   * Factory: provisions system wallets in a standalone transaction, then returns
+   * a configured WalletServiceImpl. No system-wallet provisioning runs inside
+   * hot-path money transactions.
+   *
+   * @returns A ready-to-use WalletServiceImpl
+   */
+  static async create(): Promise<WalletServiceImpl> {
+    // Dynamic import to avoid circular dependency (provision-wallet.ts imports from wallet-service.ts)
+    const { provisionSystemWallets } = await import('./provision-wallet.js');
+    const walletIds = await provisionSystemWallets();
+    return new WalletServiceImpl(walletIds);
   }
 
   private validatePositiveAmount(amountCents: Money, operation: string): void {
+    if (!Number.isInteger(amountCents)) {
+      throw new ValidationError(
+        `Amount must be an integer of cents for ${operation}`,
+        { amountCents, operation, reason: 'must be an integer of cents' },
+      );
+    }
     if (amountCents <= 0) {
       throw new ValidationError(
         `Amount must be positive for ${operation}`,
@@ -295,12 +267,13 @@ export class WalletServiceImpl implements WalletService {
   /**
    * Deposit funds into a user's wallet.
    * Ledger: debit platform_suspense, credit user_wallet.
+   * Idempotent: if a transaction with the same reference already exists, returns it.
    *
    * @param userId - The user receiving the deposit
-   * @param amountCents - Amount to deposit in USD cents (must be positive)
+   * @param amountCents - Amount to deposit in USD cents (must be positive integer)
    * @param method - Payment method used (e.g. "crypto", "stripe")
-   * @param reference - External payment provider reference ID
-   * @returns The created transaction record
+   * @param reference - External payment provider reference ID (unique, used for idempotency)
+   * @returns The created (or existing) transaction record
    */
   async deposit(
     userId: UserId,
@@ -316,61 +289,82 @@ export class WalletServiceImpl implements WalletService {
       operation: 'deposit', phase: 'start', userId, amountCents, method,
     }));
 
-    const result = await prisma.$transaction(
-      async (tx) => {
-        const wallet = await tx.wallet.findUnique({ where: { userId } });
-        if (!wallet) {
-          throw new NotFoundError('Wallet not found', { userId });
-        }
+    try {
+      const result = await prisma.$transaction(
+        async (tx) => {
+          // Idempotency: return existing transaction if reference was already processed
+          const existing = await tx.transaction.findUnique({ where: { referenceId: reference } });
+          if (existing) {
+            return mapTransaction(existing);
+          }
 
-        const suspenseWalletId = await this.getPlatformSuspenseWalletId(tx);
+          const wallet = await tx.wallet.findUnique({ where: { userId } });
+          if (!wallet) {
+            throw new NotFoundError('Wallet not found', { userId });
+          }
 
-        const txRecord = await tx.transaction.create({
-          data: {
-            walletId: wallet.id,
-            userId,
-            type: 'DEPOSIT',
-            status: 'COMPLETED',
-            amountCents: amountBigInt,
-            referenceId: reference,
-            description: `Deposit via ${method}`,
-          },
-        });
+          const suspenseWallet = await tx.wallet.findUnique({ where: { id: this.platformSuspenseWalletId } });
+          if (!suspenseWallet) {
+            throw new NotFoundError('Platform suspense wallet not found', { walletId: this.platformSuspenseWalletId });
+          }
 
-        await createBalancedLedgerEntries(tx, txRecord.id, [
-          { walletId: suspenseWalletId, debitCents: amountBigInt, creditCents: BigInt(0) },
-          { walletId: wallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
-        ]);
+          const txRecord = await tx.transaction.create({
+            data: {
+              walletId: wallet.id,
+              userId,
+              type: 'DEPOSIT',
+              status: 'COMPLETED',
+              amountCents: amountBigInt,
+              referenceId: reference,
+              description: `Deposit via ${method}`,
+            },
+          });
 
-        const newBalance = wallet.balanceCents + amountBigInt;
-        await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, newBalance);
+          await createBalancedLedgerEntries(tx, txRecord.id, [
+            { walletId: suspenseWallet.id, debitCents: amountBigInt, creditCents: BigInt(0) },
+            { walletId: wallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
+          ]);
 
-        return mapTransaction(txRecord);
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
+          // Update user wallet (credit)
+          await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, wallet.balanceCents + amountBigInt);
 
-    console.log(JSON.stringify({
-      operation: 'deposit', phase: 'complete', userId, amountCents, transactionId: result.id,
-    }));
+          // Update system wallet (debit — suspense goes negative as money enters platform)
+          await updateWalletWithOptimisticLock(tx, suspenseWallet.id, suspenseWallet.version, suspenseWallet.balanceCents - amountBigInt);
 
-    return result;
+          return mapTransaction(txRecord);
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+
+      console.log(JSON.stringify({
+        operation: 'deposit', phase: 'complete', userId, amountCents, transactionId: result.id,
+      }));
+
+      return result;
+    } catch (error: unknown) {
+      const mapped = mapPrismaError(error);
+      if (mapped) throw mapped;
+      throw error;
+    }
   }
 
   /**
    * Withdraw funds from a user's wallet.
    * Ledger: debit user_wallet, credit platform_suspense.
+   * Optionally idempotent via idempotencyKey.
    *
    * @param userId - The user requesting the withdrawal
-   * @param amountCents - Amount to withdraw in USD cents (must be positive)
+   * @param amountCents - Amount to withdraw in USD cents (must be positive integer)
    * @param method - Payment method for the withdrawal
-   * @returns The created transaction record
+   * @param idempotencyKey - Optional key to prevent duplicate withdrawals
+   * @returns The created (or existing) transaction record
    * @throws InsufficientFundsError if balance < amount
    */
   async withdraw(
     userId: UserId,
     amountCents: Money,
     method: string,
+    idempotencyKey?: string,
   ): Promise<SharedTransaction> {
     this.validatePositiveAmount(amountCents, 'withdraw');
 
@@ -380,55 +374,76 @@ export class WalletServiceImpl implements WalletService {
       operation: 'withdraw', phase: 'start', userId, amountCents, method,
     }));
 
-    const result = await prisma.$transaction(
-      async (tx) => {
-        const wallet = await tx.wallet.findUnique({ where: { userId } });
-        if (!wallet) {
-          throw new NotFoundError('Wallet not found', { userId });
-        }
+    try {
+      const result = await prisma.$transaction(
+        async (tx) => {
+          // Idempotency: if key provided, check for existing withdrawal
+          if (idempotencyKey) {
+            const existing = await tx.transaction.findUnique({ where: { referenceId: idempotencyKey } });
+            if (existing) {
+              return mapTransaction(existing);
+            }
+          }
 
-        if (wallet.balanceCents < amountBigInt) {
-          console.error(JSON.stringify({
-            operation: 'withdraw', error: 'INSUFFICIENT_FUNDS',
-            userId, amountCents, available: Number(wallet.balanceCents),
-          }));
-          throw new InsufficientFundsError(
-            'Insufficient funds for withdrawal',
-            { userId, requested: amountCents, available: Number(wallet.balanceCents) },
-          );
-        }
+          const wallet = await tx.wallet.findUnique({ where: { userId } });
+          if (!wallet) {
+            throw new NotFoundError('Wallet not found', { userId });
+          }
 
-        const suspenseWalletId = await this.getPlatformSuspenseWalletId(tx);
+          if (wallet.balanceCents < amountBigInt) {
+            console.error(JSON.stringify({
+              operation: 'withdraw', error: 'INSUFFICIENT_FUNDS',
+              userId, amountCents, available: Number(wallet.balanceCents),
+            }));
+            throw new InsufficientFundsError(
+              'Insufficient funds for withdrawal',
+              { userId, requested: amountCents, available: Number(wallet.balanceCents) },
+            );
+          }
 
-        const txRecord = await tx.transaction.create({
-          data: {
-            walletId: wallet.id,
-            userId,
-            type: 'WITHDRAWAL',
-            status: 'COMPLETED',
-            amountCents: amountBigInt,
-            description: `Withdrawal via ${method}`,
-          },
-        });
+          const suspenseWallet = await tx.wallet.findUnique({ where: { id: this.platformSuspenseWalletId } });
+          if (!suspenseWallet) {
+            throw new NotFoundError('Platform suspense wallet not found', { walletId: this.platformSuspenseWalletId });
+          }
 
-        await createBalancedLedgerEntries(tx, txRecord.id, [
-          { walletId: wallet.id, debitCents: amountBigInt, creditCents: BigInt(0) },
-          { walletId: suspenseWalletId, debitCents: BigInt(0), creditCents: amountBigInt },
-        ]);
+          const txRecord = await tx.transaction.create({
+            data: {
+              walletId: wallet.id,
+              userId,
+              type: 'WITHDRAWAL',
+              status: 'COMPLETED',
+              amountCents: amountBigInt,
+              referenceId: idempotencyKey ?? null,
+              description: `Withdrawal via ${method}`,
+            },
+          });
 
-        const newBalance = wallet.balanceCents - amountBigInt;
-        await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, newBalance);
+          await createBalancedLedgerEntries(tx, txRecord.id, [
+            { walletId: wallet.id, debitCents: amountBigInt, creditCents: BigInt(0) },
+            { walletId: suspenseWallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
+          ]);
 
-        return mapTransaction(txRecord);
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
+          // Update user wallet (debit)
+          await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, wallet.balanceCents - amountBigInt);
 
-    console.log(JSON.stringify({
-      operation: 'withdraw', phase: 'complete', userId, amountCents, transactionId: result.id,
-    }));
+          // Update system wallet (credit — money leaves platform)
+          await updateWalletWithOptimisticLock(tx, suspenseWallet.id, suspenseWallet.version, suspenseWallet.balanceCents + amountBigInt);
 
-    return result;
+          return mapTransaction(txRecord);
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+
+      console.log(JSON.stringify({
+        operation: 'withdraw', phase: 'complete', userId, amountCents, transactionId: result.id,
+      }));
+
+      return result;
+    } catch (error: unknown) {
+      const mapped = mapPrismaError(error);
+      if (mapped) throw mapped;
+      throw error;
+    }
   }
 
   /**
@@ -437,7 +452,7 @@ export class WalletServiceImpl implements WalletService {
    *
    * @param userId - The player joining the match
    * @param matchId - The match being joined
-   * @param amountCents - Entry fee in USD cents (must be positive)
+   * @param amountCents - Entry fee in USD cents (must be positive integer)
    * @returns The created transaction record
    * @throws InsufficientFundsError if balance < fee
    */
@@ -454,56 +469,68 @@ export class WalletServiceImpl implements WalletService {
       operation: 'deductEntryFee', phase: 'start', userId, matchId, amountCents,
     }));
 
-    const result = await prisma.$transaction(
-      async (tx) => {
-        const wallet = await tx.wallet.findUnique({ where: { userId } });
-        if (!wallet) {
-          throw new NotFoundError('Wallet not found', { userId });
-        }
+    try {
+      const result = await prisma.$transaction(
+        async (tx) => {
+          const wallet = await tx.wallet.findUnique({ where: { userId } });
+          if (!wallet) {
+            throw new NotFoundError('Wallet not found', { userId });
+          }
 
-        if (wallet.balanceCents < amountBigInt) {
-          console.error(JSON.stringify({
-            operation: 'deductEntryFee', error: 'INSUFFICIENT_FUNDS',
-            userId, matchId, amountCents, available: Number(wallet.balanceCents),
-          }));
-          throw new InsufficientFundsError(
-            'Insufficient funds for entry fee',
-            { userId, matchId, requested: amountCents, available: Number(wallet.balanceCents) },
-          );
-        }
+          if (wallet.balanceCents < amountBigInt) {
+            console.error(JSON.stringify({
+              operation: 'deductEntryFee', error: 'INSUFFICIENT_FUNDS',
+              userId, matchId, amountCents, available: Number(wallet.balanceCents),
+            }));
+            throw new InsufficientFundsError(
+              'Insufficient funds for entry fee',
+              { userId, matchId, requested: amountCents, available: Number(wallet.balanceCents) },
+            );
+          }
 
-        const matchPoolWalletId = await this.getMatchPoolWalletId(tx);
+          const matchPoolWallet = await tx.wallet.findUnique({ where: { id: this.matchPoolWalletId } });
+          if (!matchPoolWallet) {
+            throw new NotFoundError('Match pool wallet not found', { walletId: this.matchPoolWalletId });
+          }
 
-        const txRecord = await tx.transaction.create({
-          data: {
-            walletId: wallet.id,
-            userId,
-            type: 'ENTRY_FEE',
-            status: 'COMPLETED',
-            amountCents: amountBigInt,
-            matchId,
-          },
-        });
+          const txRecord = await tx.transaction.create({
+            data: {
+              walletId: wallet.id,
+              userId,
+              type: 'ENTRY_FEE',
+              status: 'COMPLETED',
+              amountCents: amountBigInt,
+              matchId,
+            },
+          });
 
-        await createBalancedLedgerEntries(tx, txRecord.id, [
-          { walletId: wallet.id, debitCents: amountBigInt, creditCents: BigInt(0) },
-          { walletId: matchPoolWalletId, debitCents: BigInt(0), creditCents: amountBigInt },
-        ]);
+          await createBalancedLedgerEntries(tx, txRecord.id, [
+            { walletId: wallet.id, debitCents: amountBigInt, creditCents: BigInt(0) },
+            { walletId: matchPoolWallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
+          ]);
 
-        const newBalance = wallet.balanceCents - amountBigInt;
-        await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, newBalance);
+          // Update user wallet (debit)
+          await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, wallet.balanceCents - amountBigInt);
 
-        return mapTransaction(txRecord);
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
+          // Update system wallet (credit — money enters match pool)
+          await updateWalletWithOptimisticLock(tx, matchPoolWallet.id, matchPoolWallet.version, matchPoolWallet.balanceCents + amountBigInt);
 
-    console.log(JSON.stringify({
-      operation: 'deductEntryFee', phase: 'complete', userId, matchId, amountCents,
-      transactionId: result.id,
-    }));
+          return mapTransaction(txRecord);
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
 
-    return result;
+      console.log(JSON.stringify({
+        operation: 'deductEntryFee', phase: 'complete', userId, matchId, amountCents,
+        transactionId: result.id,
+      }));
+
+      return result;
+    } catch (error: unknown) {
+      const mapped = mapPrismaError(error);
+      if (mapped) throw mapped;
+      throw error;
+    }
   }
 
   /**
@@ -512,8 +539,9 @@ export class WalletServiceImpl implements WalletService {
    *
    * @param userId - The winning player
    * @param matchId - The resolved match
-   * @param amountCents - Prize amount in USD cents (must be positive)
+   * @param amountCents - Prize amount in USD cents (must be positive integer)
    * @returns The created transaction record
+   * @throws InsufficientFundsError if match_pool balance < prize amount
    */
   async awardPrize(
     userId: UserId,
@@ -528,45 +556,150 @@ export class WalletServiceImpl implements WalletService {
       operation: 'awardPrize', phase: 'start', userId, matchId, amountCents,
     }));
 
-    const result = await prisma.$transaction(
-      async (tx) => {
-        const wallet = await tx.wallet.findUnique({ where: { userId } });
-        if (!wallet) {
-          throw new NotFoundError('Wallet not found', { userId });
-        }
+    try {
+      const result = await prisma.$transaction(
+        async (tx) => {
+          const wallet = await tx.wallet.findUnique({ where: { userId } });
+          if (!wallet) {
+            throw new NotFoundError('Wallet not found', { userId });
+          }
 
-        const matchPoolWalletId = await this.getMatchPoolWalletId(tx);
+          const matchPoolWallet = await tx.wallet.findUnique({ where: { id: this.matchPoolWalletId } });
+          if (!matchPoolWallet) {
+            throw new NotFoundError('Match pool wallet not found', { walletId: this.matchPoolWalletId });
+          }
 
-        const txRecord = await tx.transaction.create({
-          data: {
-            walletId: wallet.id,
-            userId,
-            type: 'PRIZE',
-            status: 'COMPLETED',
-            amountCents: amountBigInt,
-            matchId,
-          },
-        });
+          // Check match pool has sufficient funds
+          const newMatchPoolBalance = matchPoolWallet.balanceCents - amountBigInt;
+          if (newMatchPoolBalance < BigInt(0)) {
+            throw new InsufficientFundsError(
+              'Match pool has insufficient funds for prize payout',
+              { matchPoolBalance: Number(matchPoolWallet.balanceCents), requested: amountCents, matchId },
+            );
+          }
 
-        await createBalancedLedgerEntries(tx, txRecord.id, [
-          { walletId: matchPoolWalletId, debitCents: amountBigInt, creditCents: BigInt(0) },
-          { walletId: wallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
-        ]);
+          const txRecord = await tx.transaction.create({
+            data: {
+              walletId: wallet.id,
+              userId,
+              type: 'PRIZE',
+              status: 'COMPLETED',
+              amountCents: amountBigInt,
+              matchId,
+            },
+          });
 
-        const newBalance = wallet.balanceCents + amountBigInt;
-        await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, newBalance);
+          await createBalancedLedgerEntries(tx, txRecord.id, [
+            { walletId: matchPoolWallet.id, debitCents: amountBigInt, creditCents: BigInt(0) },
+            { walletId: wallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
+          ]);
 
-        return mapTransaction(txRecord);
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
+          // Update user wallet (credit)
+          await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, wallet.balanceCents + amountBigInt);
+
+          // Update system wallet (debit)
+          await updateWalletWithOptimisticLock(tx, matchPoolWallet.id, matchPoolWallet.version, newMatchPoolBalance);
+
+          return mapTransaction(txRecord);
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+
+      console.log(JSON.stringify({
+        operation: 'awardPrize', phase: 'complete', userId, matchId, amountCents,
+        transactionId: result.id,
+      }));
+
+      return result;
+    } catch (error: unknown) {
+      const mapped = mapPrismaError(error);
+      if (mapped) throw mapped;
+      throw error;
+    }
+  }
+
+  /**
+   * Record platform rake from a resolved match.
+   * Ledger: debit match_pool, credit platform_revenue.
+   * Does not compute rake — the caller passes the computed amount.
+   *
+   * @param matchId - The resolved match
+   * @param rakeCents - Rake amount in USD cents (must be positive integer)
+   * @returns The created transaction record
+   * @throws InsufficientFundsError if match_pool balance < rake amount
+   */
+  async collectRake(
+    matchId: MatchId,
+    rakeCents: Money,
+  ): Promise<SharedTransaction> {
+    this.validatePositiveAmount(rakeCents, 'collectRake');
+
+    const rakeBigInt = moneyToBigInt(rakeCents);
 
     console.log(JSON.stringify({
-      operation: 'awardPrize', phase: 'complete', userId, matchId, amountCents,
-      transactionId: result.id,
+      operation: 'collectRake', phase: 'start', matchId, rakeCents,
     }));
 
-    return result;
+    try {
+      const result = await prisma.$transaction(
+        async (tx) => {
+          const matchPoolWallet = await tx.wallet.findUnique({ where: { id: this.matchPoolWalletId } });
+          if (!matchPoolWallet) {
+            throw new NotFoundError('Match pool wallet not found', { walletId: this.matchPoolWalletId });
+          }
+
+          const revenueWallet = await tx.wallet.findUnique({ where: { id: this.platformRevenueWalletId } });
+          if (!revenueWallet) {
+            throw new NotFoundError('Platform revenue wallet not found', { walletId: this.platformRevenueWalletId });
+          }
+
+          // Check match pool has sufficient funds
+          const newMatchPoolBalance = matchPoolWallet.balanceCents - rakeBigInt;
+          if (newMatchPoolBalance < BigInt(0)) {
+            throw new InsufficientFundsError(
+              'Match pool has insufficient funds for rake collection',
+              { matchPoolBalance: Number(matchPoolWallet.balanceCents), requested: rakeCents, matchId },
+            );
+          }
+
+          const txRecord = await tx.transaction.create({
+            data: {
+              walletId: matchPoolWallet.id,
+              userId: matchPoolWallet.userId,
+              type: 'RAKE',
+              status: 'COMPLETED',
+              amountCents: rakeBigInt,
+              matchId,
+            },
+          });
+
+          await createBalancedLedgerEntries(tx, txRecord.id, [
+            { walletId: matchPoolWallet.id, debitCents: rakeBigInt, creditCents: BigInt(0) },
+            { walletId: revenueWallet.id, debitCents: BigInt(0), creditCents: rakeBigInt },
+          ]);
+
+          // Update match pool (debit)
+          await updateWalletWithOptimisticLock(tx, matchPoolWallet.id, matchPoolWallet.version, newMatchPoolBalance);
+
+          // Update revenue (credit)
+          await updateWalletWithOptimisticLock(tx, revenueWallet.id, revenueWallet.version, revenueWallet.balanceCents + rakeBigInt);
+
+          return mapTransaction(txRecord);
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+
+      console.log(JSON.stringify({
+        operation: 'collectRake', phase: 'complete', matchId, rakeCents,
+        transactionId: result.id,
+      }));
+
+      return result;
+    } catch (error: unknown) {
+      const mapped = mapPrismaError(error);
+      if (mapped) throw mapped;
+      throw error;
+    }
   }
 
   /**
@@ -577,11 +710,17 @@ export class WalletServiceImpl implements WalletService {
    * @throws NotFoundError if the wallet does not exist
    */
   async getBalance(userId: UserId): Promise<SharedWallet> {
-    const wallet = await prisma.wallet.findUnique({ where: { userId } });
-    if (!wallet) {
-      throw new NotFoundError('Wallet not found', { userId });
+    try {
+      const wallet = await prisma.wallet.findUnique({ where: { userId } });
+      if (!wallet) {
+        throw new NotFoundError('Wallet not found', { userId });
+      }
+      return mapWallet(wallet);
+    } catch (error: unknown) {
+      const mapped = mapPrismaError(error);
+      if (mapped) throw mapped;
+      throw error;
     }
-    return mapWallet(wallet);
   }
 
   /**
@@ -591,37 +730,55 @@ export class WalletServiceImpl implements WalletService {
    * @param pagination - Offset and limit for paging (limit capped at 100, default 50)
    * @returns Paginated list of transactions
    * @throws NotFoundError if the wallet does not exist
+   * @throws ValidationError if pagination values are invalid
    */
   async getTransactionHistory(
     userId: UserId,
     pagination: PaginationParams,
   ): Promise<PaginatedResult<SharedTransaction>> {
-    const limit = Math.min(pagination.limit || DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
-    const offset = pagination.offset || 0;
-
-    const wallet = await prisma.wallet.findUnique({
-      where: { userId },
-      select: { id: true },
-    });
-    if (!wallet) {
-      throw new NotFoundError('Wallet not found', { userId });
+    if (pagination.limit !== undefined && (pagination.limit < 0 || !Number.isInteger(pagination.limit))) {
+      throw new ValidationError('Pagination limit must be a non-negative integer', {
+        limit: pagination.limit,
+      });
+    }
+    if (pagination.offset !== undefined && (pagination.offset < 0 || !Number.isInteger(pagination.offset))) {
+      throw new ValidationError('Pagination offset must be a non-negative integer', {
+        offset: pagination.offset,
+      });
     }
 
-    const [transactions, total] = await Promise.all([
-      prisma.transaction.findMany({
-        where: { walletId: wallet.id },
-        orderBy: { createdAt: 'desc' },
-        take: limit,
-        skip: offset,
-      }),
-      prisma.transaction.count({
-        where: { walletId: wallet.id },
-      }),
-    ]);
+    const limit = Math.min(pagination.limit ?? DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
+    const offset = pagination.offset ?? 0;
 
-    return {
-      items: transactions.map(mapTransaction),
-      total,
-    };
+    try {
+      const wallet = await prisma.wallet.findUnique({
+        where: { userId },
+        select: { id: true },
+      });
+      if (!wallet) {
+        throw new NotFoundError('Wallet not found', { userId });
+      }
+
+      const [transactions, total] = await Promise.all([
+        prisma.transaction.findMany({
+          where: { walletId: wallet.id },
+          orderBy: { createdAt: 'desc' },
+          take: limit,
+          skip: offset,
+        }),
+        prisma.transaction.count({
+          where: { walletId: wallet.id },
+        }),
+      ]);
+
+      return {
+        items: transactions.map(mapTransaction),
+        total,
+      };
+    } catch (error: unknown) {
+      const mapped = mapPrismaError(error);
+      if (mapped) throw mapped;
+      throw error;
+    }
   }
 }

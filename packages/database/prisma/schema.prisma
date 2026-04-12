@@ -106,7 +106,7 @@ model Transaction {
   status        TransactionStatus
   amountCents   BigInt
   matchId       String?
-  referenceId   String?
+  referenceId   String?           @unique
   description   String?
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt

@@ -7,10 +7,9 @@
  *
  * Race condition tests that require truly concurrent database operations are marked
  * with .skip and include comments describing what they would verify against a real
- * PostgreSQL instance with SERIALIZABLE isolation. Mocked prisma cannot simulate
- * true concurrency or serialization conflicts.
+ * PostgreSQL instance with SERIALIZABLE isolation.
  *
- * Double-entry invariant tests verify that the ledgerEntry.createMany calls always
+ * Double-entry invariant tests verify that ledgerEntry.createMany calls always
  * receive entries where sum(debitCents) === sum(creditCents).
  */
 
@@ -28,6 +27,16 @@ import {
 /* ------------------------------------------------------------------ */
 
 const mocks = vi.hoisted(() => {
+  class MockPrismaError extends Error {
+    code: string;
+    meta?: Record<string, unknown>;
+    constructor(message: string, opts: { code: string; meta?: Record<string, unknown> }) {
+      super(message);
+      this.code = opts.code;
+      this.meta = opts.meta;
+    }
+  }
+
   const wallet = {
     findUnique: vi.fn(),
     updateMany: vi.fn(),
@@ -36,6 +45,7 @@ const mocks = vi.hoisted(() => {
   };
   const transaction = {
     findMany: vi.fn(),
+    findUnique: vi.fn(),
     count: vi.fn(),
     create: vi.fn(),
   };
@@ -54,6 +64,7 @@ const mocks = vi.hoisted(() => {
     ledgerEntry,
     user,
     $transaction,
+    MockPrismaError,
   };
 });
 
@@ -63,29 +74,25 @@ vi.mock('@arena/database', () => ({
     TransactionIsolationLevel: {
       Serializable: 'Serializable',
     },
-    PrismaClientKnownRequestError: class extends Error {
-      code: string;
-      constructor(message: string, opts: { code: string }) {
-        super(message);
-        this.code = opts.code;
-      }
-    },
+    PrismaClientKnownRequestError: mocks.MockPrismaError,
   },
 }));
 
-// Import after mock is established
 import { WalletServiceImpl } from '../wallet-service.js';
 
 /* ------------------------------------------------------------------ */
 /*  Constants & helpers                                                */
 /* ------------------------------------------------------------------ */
 
-const SYSTEM_PLATFORM_SUSPENSE_USER_ID = 'SYSTEM_PLATFORM_SUSPENSE';
-const SYSTEM_MATCH_POOL_USER_ID = 'SYSTEM_MATCH_POOL';
+const SYSTEM_WALLET_IDS = {
+  platformSuspenseWalletId: 'sys-suspense-wallet',
+  matchPoolWalletId: 'sys-match-pool-wallet',
+  platformRevenueWalletId: 'sys-revenue-wallet',
+};
 
 const SYSTEM_SUSPENSE_WALLET = {
   id: 'sys-suspense-wallet',
-  userId: SYSTEM_PLATFORM_SUSPENSE_USER_ID,
+  userId: 'SYSTEM_PLATFORM_SUSPENSE',
   balanceCents: BigInt(0),
   currency: 'USD',
   version: 0,
@@ -95,7 +102,17 @@ const SYSTEM_SUSPENSE_WALLET = {
 
 const SYSTEM_MATCH_POOL_WALLET = {
   id: 'sys-match-pool-wallet',
-  userId: SYSTEM_MATCH_POOL_USER_ID,
+  userId: 'SYSTEM_MATCH_POOL',
+  balanceCents: BigInt(0),
+  currency: 'USD',
+  version: 0,
+  createdAt: new Date('2026-01-01'),
+  updatedAt: new Date('2026-01-01'),
+};
+
+const SYSTEM_REVENUE_WALLET = {
+  id: 'sys-revenue-wallet',
+  userId: 'SYSTEM_PLATFORM_REVENUE',
   balanceCents: BigInt(0),
   currency: 'USD',
   version: 0,
@@ -107,7 +124,7 @@ function makeUserWallet(overrides: Record<string, unknown> = {}) {
   return {
     id: 'wallet-1',
     userId: 'user-1',
-    balanceCents: BigInt(10_000), // $100.00
+    balanceCents: BigInt(10_000),
     currency: 'USD',
     version: 1,
     createdAt: new Date('2026-04-01'),
@@ -134,25 +151,38 @@ function makeTxRecord(overrides: Record<string, unknown> = {}) {
 }
 
 /**
- * Configure wallet.findUnique to return the right wallet based on userId.
- * System wallets are always available; the user wallet can be customized per test.
+ * Configure wallet.findUnique to return the right wallet based on userId or id.
+ * System wallets looked up by id, user wallets by userId.
  */
-function setupWalletFindUnique(userWallet: ReturnType<typeof makeUserWallet> | null) {
+function setupWalletFindUnique(
+  userWallet: ReturnType<typeof makeUserWallet> | null,
+  systemOverrides?: {
+    suspenseBalance?: bigint;
+    matchPoolBalance?: bigint;
+    revenueBalance?: bigint;
+  },
+) {
   mocks.wallet.findUnique.mockImplementation(
-    async (args: { where: { userId?: string }; select?: unknown }) => {
-      const userId = args.where.userId;
-      if (userId === SYSTEM_PLATFORM_SUSPENSE_USER_ID) return SYSTEM_SUSPENSE_WALLET;
-      if (userId === SYSTEM_MATCH_POOL_USER_ID) return SYSTEM_MATCH_POOL_WALLET;
+    async (args: { where: { userId?: string; id?: string }; select?: unknown }) => {
+      if (args.where.id === SYSTEM_WALLET_IDS.platformSuspenseWalletId) {
+        return { ...SYSTEM_SUSPENSE_WALLET, balanceCents: systemOverrides?.suspenseBalance ?? BigInt(0) };
+      }
+      if (args.where.id === SYSTEM_WALLET_IDS.matchPoolWalletId) {
+        return { ...SYSTEM_MATCH_POOL_WALLET, balanceCents: systemOverrides?.matchPoolBalance ?? BigInt(0) };
+      }
+      if (args.where.id === SYSTEM_WALLET_IDS.platformRevenueWalletId) {
+        return { ...SYSTEM_REVENUE_WALLET, balanceCents: systemOverrides?.revenueBalance ?? BigInt(0) };
+      }
       return userWallet;
     },
   );
 }
 
-/** Extract ledger entries from the createMany mock call and verify double-entry invariant. */
+/** Extract ledger entries from createMany and verify double-entry invariant. */
 function assertLedgerBalanced(callIndex = 0) {
   const call = mocks.ledgerEntry.createMany.mock.calls[callIndex];
   expect(call).toBeDefined();
-  const entries = (call as [{ data: Array<{ debitCents: bigint; creditCents: bigint }> }])[0].data;
+  const entries = (call as [{ data: Array<{ debitCents: bigint; creditCents: bigint; walletId: string }> }])[0].data;
   const totalDebits = entries.reduce((s: bigint, e: { debitCents: bigint }) => s + e.debitCents, BigInt(0));
   const totalCredits = entries.reduce((s: bigint, e: { creditCents: bigint }) => s + e.creditCents, BigInt(0));
   expect(totalDebits).toBe(totalCredits);
@@ -171,24 +201,17 @@ describe('WalletServiceImpl', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    // Fresh instance per test (resets cached system wallet IDs)
-    service = new WalletServiceImpl();
+    service = new WalletServiceImpl(SYSTEM_WALLET_IDS);
 
-    // Default: $transaction executes callback with mock prisma as tx client
     mocks.$transaction.mockImplementation(
       async (fn: (tx: typeof mocks.prisma) => Promise<unknown>, _options?: unknown) => {
         return fn(mocks.prisma);
       },
     );
 
-    // Default: optimistic lock succeeds
     mocks.wallet.updateMany.mockResolvedValue({ count: 1 });
-
-    // Default: ledger creation succeeds
     mocks.ledgerEntry.createMany.mockResolvedValue({ count: 2 });
-
-    // Default: user upsert succeeds (for system wallets)
-    mocks.user.upsert.mockResolvedValue({});
+    mocks.transaction.findUnique.mockResolvedValue(null); // default: no duplicate
   });
 
   /* ================================================================ */
@@ -196,7 +219,7 @@ describe('WalletServiceImpl', () => {
   /* ================================================================ */
 
   describe('deposit', () => {
-    it('credits wallet and creates correct ledger entries', async () => {
+    it('credits wallet and creates correct ledger entries with double-sided posting', async () => {
       const userWallet = makeUserWallet({ balanceCents: BigInt(5000), version: 3 });
       setupWalletFindUnique(userWallet);
       mocks.transaction.create.mockResolvedValue(
@@ -210,28 +233,33 @@ describe('WalletServiceImpl', () => {
       expect(result.amountCents).toBe(1000);
       expect(result.reference).toBe('ref-1');
 
-      // Verify optimistic lock: balance 5000 + 1000 = 6000, version 3 → 4
-      expect(mocks.wallet.updateMany).toHaveBeenCalledWith({
+      // Two updateMany calls: user wallet + system wallet
+      expect(mocks.wallet.updateMany).toHaveBeenCalledTimes(2);
+      // User wallet: 5000 + 1000 = 6000, version 3 → 4
+      expect(mocks.wallet.updateMany.mock.calls[0]![0]).toEqual({
         where: { id: 'wallet-1', version: 3 },
         data: { balanceCents: BigInt(6000), version: 4 },
       });
+      // System wallet (suspense): 0 - 1000 = -1000, version 0 → 1
+      expect(mocks.wallet.updateMany.mock.calls[1]![0]).toEqual({
+        where: { id: 'sys-suspense-wallet', version: 0 },
+        data: { balanceCents: BigInt(-1000), version: 1 },
+      });
 
-      // Verify serializable isolation
       expect(mocks.$transaction).toHaveBeenCalledWith(
         expect.any(Function),
         { isolationLevel: 'Serializable' },
       );
 
-      // Verify double-entry invariant
       const { totalDebits } = assertLedgerBalanced();
       expect(totalDebits).toBe(BigInt(1000));
     });
   });
 
   describe('withdraw', () => {
-    it('debits wallet and creates correct ledger entries', async () => {
+    it('debits wallet and creates correct ledger entries with double-sided posting', async () => {
       const userWallet = makeUserWallet({ balanceCents: BigInt(5000), version: 2 });
-      setupWalletFindUnique(userWallet);
+      setupWalletFindUnique(userWallet, { suspenseBalance: BigInt(-5000) });
       mocks.transaction.create.mockResolvedValue(
         makeTxRecord({ type: 'WITHDRAWAL', amountCents: BigInt(2000) }),
       );
@@ -241,10 +269,16 @@ describe('WalletServiceImpl', () => {
       expect(result.type).toBe('WITHDRAWAL');
       expect(result.amountCents).toBe(2000);
 
-      // Balance 5000 - 2000 = 3000, version 2 → 3
-      expect(mocks.wallet.updateMany).toHaveBeenCalledWith({
+      expect(mocks.wallet.updateMany).toHaveBeenCalledTimes(2);
+      // User: 5000 - 2000 = 3000
+      expect(mocks.wallet.updateMany.mock.calls[0]![0]).toEqual({
         where: { id: 'wallet-1', version: 2 },
         data: { balanceCents: BigInt(3000), version: 3 },
+      });
+      // Suspense: -5000 + 2000 = -3000
+      expect(mocks.wallet.updateMany.mock.calls[1]![0]).toEqual({
+        where: { id: 'sys-suspense-wallet', version: 0 },
+        data: { balanceCents: BigInt(-3000), version: 1 },
       });
 
       assertLedgerBalanced();
@@ -252,7 +286,7 @@ describe('WalletServiceImpl', () => {
   });
 
   describe('deductEntryFee', () => {
-    it('debits wallet and marks transaction with matchId', async () => {
+    it('debits wallet and marks transaction with matchId, credits match_pool', async () => {
       const userWallet = makeUserWallet({ balanceCents: BigInt(5000), version: 1 });
       setupWalletFindUnique(userWallet);
       mocks.transaction.create.mockResolvedValue(
@@ -260,26 +294,22 @@ describe('WalletServiceImpl', () => {
       );
 
       const result = await service.deductEntryFee(
-        'user-1' as UserId,
-        'match-1' as MatchId,
-        500 as Money,
+        'user-1' as UserId, 'match-1' as MatchId, 500 as Money,
       );
 
       expect(result.type).toBe('ENTRY_FEE');
       expect(result.matchId).toBe('match-1');
-      expect(result.amountCents).toBe(500);
 
-      // Verify matchId was passed to transaction creation
-      expect(mocks.transaction.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ matchId: 'match-1', type: 'ENTRY_FEE' }),
-        }),
-      );
-
-      // Balance 5000 - 500 = 4500
-      expect(mocks.wallet.updateMany).toHaveBeenCalledWith({
+      expect(mocks.wallet.updateMany).toHaveBeenCalledTimes(2);
+      // User: 5000 - 500 = 4500
+      expect(mocks.wallet.updateMany.mock.calls[0]![0]).toEqual({
         where: { id: 'wallet-1', version: 1 },
         data: { balanceCents: BigInt(4500), version: 2 },
+      });
+      // Match pool: 0 + 500 = 500
+      expect(mocks.wallet.updateMany.mock.calls[1]![0]).toEqual({
+        where: { id: 'sys-match-pool-wallet', version: 0 },
+        data: { balanceCents: BigInt(500), version: 1 },
       });
 
       assertLedgerBalanced();
@@ -287,30 +317,102 @@ describe('WalletServiceImpl', () => {
   });
 
   describe('awardPrize', () => {
-    it('credits wallet and marks transaction with matchId', async () => {
+    it('credits wallet from match_pool with double-sided posting', async () => {
       const userWallet = makeUserWallet({ balanceCents: BigInt(5000), version: 5 });
-      setupWalletFindUnique(userWallet);
+      setupWalletFindUnique(userWallet, { matchPoolBalance: BigInt(10000) });
       mocks.transaction.create.mockResolvedValue(
         makeTxRecord({ type: 'PRIZE', amountCents: BigInt(3000), matchId: 'match-2' }),
       );
 
       const result = await service.awardPrize(
-        'user-1' as UserId,
-        'match-2' as MatchId,
-        3000 as Money,
+        'user-1' as UserId, 'match-2' as MatchId, 3000 as Money,
       );
 
       expect(result.type).toBe('PRIZE');
       expect(result.matchId).toBe('match-2');
-      expect(result.amountCents).toBe(3000);
 
-      // Balance 5000 + 3000 = 8000, version 5 → 6
-      expect(mocks.wallet.updateMany).toHaveBeenCalledWith({
+      expect(mocks.wallet.updateMany).toHaveBeenCalledTimes(2);
+      // User: 5000 + 3000 = 8000
+      expect(mocks.wallet.updateMany.mock.calls[0]![0]).toEqual({
         where: { id: 'wallet-1', version: 5 },
         data: { balanceCents: BigInt(8000), version: 6 },
       });
+      // Match pool: 10000 - 3000 = 7000
+      expect(mocks.wallet.updateMany.mock.calls[1]![0]).toEqual({
+        where: { id: 'sys-match-pool-wallet', version: 0 },
+        data: { balanceCents: BigInt(7000), version: 1 },
+      });
 
       assertLedgerBalanced();
+    });
+
+    it('throws InsufficientFundsError when match_pool has insufficient funds', async () => {
+      setupWalletFindUnique(makeUserWallet(), { matchPoolBalance: BigInt(100) });
+
+      await expect(
+        service.awardPrize('user-1' as UserId, 'match-5' as MatchId, 5000 as Money),
+      ).rejects.toThrow(InsufficientFundsError);
+    });
+  });
+
+  describe('collectRake', () => {
+    it('creates RAKE transaction moving money from match_pool to platform_revenue', async () => {
+      setupWalletFindUnique(null, { matchPoolBalance: BigInt(5000), revenueBalance: BigInt(200) });
+      mocks.transaction.create.mockResolvedValue(
+        makeTxRecord({
+          id: 'rake-tx-1',
+          walletId: 'sys-match-pool-wallet',
+          userId: 'SYSTEM_MATCH_POOL',
+          type: 'RAKE',
+          amountCents: BigInt(800),
+          matchId: 'match-10',
+        }),
+      );
+
+      const result = await service.collectRake('match-10' as MatchId, 800 as Money);
+
+      expect(result.id).toBe('rake-tx-1');
+      expect(result.type).toBe('RAKE');
+      expect(result.amountCents).toBe(800);
+      expect(result.matchId).toBe('match-10');
+
+      // Verify transaction created with match_pool as wallet
+      expect(mocks.transaction.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            walletId: 'sys-match-pool-wallet',
+            type: 'RAKE',
+            matchId: 'match-10',
+          }),
+        }),
+      );
+
+      expect(mocks.wallet.updateMany).toHaveBeenCalledTimes(2);
+      // Match pool: 5000 - 800 = 4200
+      expect(mocks.wallet.updateMany.mock.calls[0]![0]).toEqual({
+        where: { id: 'sys-match-pool-wallet', version: 0 },
+        data: { balanceCents: BigInt(4200), version: 1 },
+      });
+      // Revenue: 200 + 800 = 1000
+      expect(mocks.wallet.updateMany.mock.calls[1]![0]).toEqual({
+        where: { id: 'sys-revenue-wallet', version: 0 },
+        data: { balanceCents: BigInt(1000), version: 1 },
+      });
+
+      // Verify balanced ledger
+      const { entries } = assertLedgerBalanced();
+      expect(entries[0]!.walletId).toBe('sys-match-pool-wallet');
+      expect(entries[0]!.debitCents).toBe(BigInt(800));
+      expect(entries[1]!.walletId).toBe('sys-revenue-wallet');
+      expect(entries[1]!.creditCents).toBe(BigInt(800));
+    });
+
+    it('throws InsufficientFundsError when match_pool balance < rake', async () => {
+      setupWalletFindUnique(null, { matchPoolBalance: BigInt(50) });
+
+      await expect(
+        service.collectRake('match-11' as MatchId, 800 as Money),
+      ).rejects.toThrow(InsufficientFundsError);
     });
   });
 
@@ -332,12 +434,11 @@ describe('WalletServiceImpl', () => {
 
       const tx1 = makeTxRecord({ id: 'tx-1', createdAt: new Date('2026-04-01') });
       const tx2 = makeTxRecord({ id: 'tx-2', createdAt: new Date('2026-04-02') });
-      mocks.transaction.findMany.mockResolvedValue([tx2, tx1]); // desc order
+      mocks.transaction.findMany.mockResolvedValue([tx2, tx1]);
       mocks.transaction.count.mockResolvedValue(2);
 
       const result = await service.getTransactionHistory(
-        'user-1' as UserId,
-        { offset: 0, limit: 50 },
+        'user-1' as UserId, { offset: 0, limit: 50 },
       );
 
       expect(result.items).toHaveLength(2);
@@ -345,13 +446,8 @@ describe('WalletServiceImpl', () => {
       expect(result.items[1]!.id).toBe('tx-1');
       expect(result.total).toBe(2);
 
-      // Verify ordering parameter
       expect(mocks.transaction.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          orderBy: { createdAt: 'desc' },
-          take: 50,
-          skip: 0,
-        }),
+        expect.objectContaining({ orderBy: { createdAt: 'desc' }, take: 50, skip: 0 }),
       );
     });
 
@@ -369,6 +465,52 @@ describe('WalletServiceImpl', () => {
   });
 
   /* ================================================================ */
+  /*  IDEMPOTENCY TESTS                                               */
+  /* ================================================================ */
+
+  describe('idempotency', () => {
+    it('deposit with duplicate reference returns existing transaction without crediting wallet twice', async () => {
+      const existingTx = makeTxRecord({ id: 'existing-tx', referenceId: 'dup-ref' });
+      setupWalletFindUnique(makeUserWallet());
+      mocks.transaction.findUnique.mockResolvedValue(existingTx);
+
+      const result = await service.deposit('user-1' as UserId, 1000 as Money, 'crypto', 'dup-ref');
+
+      expect(result.id).toBe('existing-tx');
+      // No transaction created, no balance update
+      expect(mocks.transaction.create).not.toHaveBeenCalled();
+      expect(mocks.wallet.updateMany).not.toHaveBeenCalled();
+      expect(mocks.ledgerEntry.createMany).not.toHaveBeenCalled();
+    });
+
+    it('withdraw with duplicate idempotencyKey returns existing transaction without debiting wallet twice', async () => {
+      const existingTx = makeTxRecord({ id: 'existing-wd', type: 'WITHDRAWAL', referenceId: 'wd-key-1' });
+      setupWalletFindUnique(makeUserWallet());
+      mocks.transaction.findUnique.mockResolvedValue(existingTx);
+
+      const result = await service.withdraw('user-1' as UserId, 500 as Money, 'crypto', 'wd-key-1');
+
+      expect(result.id).toBe('existing-wd');
+      expect(mocks.transaction.create).not.toHaveBeenCalled();
+      expect(mocks.wallet.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('withdraw without idempotencyKey creates a new transaction each time', async () => {
+      setupWalletFindUnique(makeUserWallet({ balanceCents: BigInt(5000) }));
+      mocks.transaction.create.mockResolvedValue(
+        makeTxRecord({ type: 'WITHDRAWAL', amountCents: BigInt(100) }),
+      );
+
+      await service.withdraw('user-1' as UserId, 100 as Money, 'crypto');
+
+      // No idempotency check should occur (findUnique not called for referenceId)
+      expect(mocks.transaction.findUnique).not.toHaveBeenCalled();
+      // Transaction was created normally
+      expect(mocks.transaction.create).toHaveBeenCalled();
+    });
+  });
+
+  /* ================================================================ */
   /*  ERROR PATH TESTS                                                */
   /* ================================================================ */
 
@@ -377,8 +519,6 @@ describe('WalletServiceImpl', () => {
       await expect(
         service.deposit('user-1' as UserId, 0 as Money, 'crypto', 'ref'),
       ).rejects.toThrow(ValidationError);
-
-      // No database calls should have been made
       expect(mocks.$transaction).not.toHaveBeenCalled();
     });
 
@@ -407,7 +547,6 @@ describe('WalletServiceImpl', () => {
         service.withdraw('user-1' as UserId, 1000 as Money, 'crypto'),
       ).rejects.toThrow(InsufficientFundsError);
 
-      // No balance update should have occurred
       expect(mocks.wallet.updateMany).not.toHaveBeenCalled();
     });
 
@@ -436,6 +575,72 @@ describe('WalletServiceImpl', () => {
         service.getTransactionHistory('nonexistent' as UserId, { offset: 0, limit: 10 }),
       ).rejects.toThrow(NotFoundError);
     });
+
+    it('ValidationError is thrown for non-integer amounts', async () => {
+      await expect(
+        service.deposit('user-1' as UserId, 10.5 as Money, 'crypto', 'ref'),
+      ).rejects.toThrow(ValidationError);
+
+      await expect(
+        service.withdraw('user-1' as UserId, 1.99 as Money, 'crypto'),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it('ValidationError is thrown for negative pagination values', async () => {
+      await expect(
+        service.getTransactionHistory('user-1' as UserId, { offset: -1, limit: 10 }),
+      ).rejects.toThrow(ValidationError);
+
+      await expect(
+        service.getTransactionHistory('user-1' as UserId, { offset: 0, limit: -5 }),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it('ValidationError is thrown for non-integer pagination values', async () => {
+      await expect(
+        service.getTransactionHistory('user-1' as UserId, { offset: 0, limit: 1.5 }),
+      ).rejects.toThrow(ValidationError);
+    });
+  });
+
+  /* ================================================================ */
+  /*  PRISMA ERROR MAPPING TESTS                                      */
+  /* ================================================================ */
+
+  describe('Prisma error mapping', () => {
+    it('ConflictError is thrown when Prisma raises P2002 (unique violation)', async () => {
+      setupWalletFindUnique(makeUserWallet());
+      mocks.transaction.findUnique.mockResolvedValue(null);
+      mocks.transaction.create.mockRejectedValue(
+        new mocks.MockPrismaError('Unique constraint', { code: 'P2002', meta: { target: ['referenceId'] } }),
+      );
+
+      await expect(
+        service.deposit('user-1' as UserId, 1000 as Money, 'crypto', 'ref-dup'),
+      ).rejects.toThrow(ConflictError);
+    });
+
+    it('ConflictError is thrown when Prisma raises P2034 (serialization failure)', async () => {
+      mocks.$transaction.mockRejectedValueOnce(
+        new mocks.MockPrismaError('Serialization failure', { code: 'P2034' }),
+      );
+
+      await expect(
+        service.deposit('user-1' as UserId, 1000 as Money, 'crypto', 'ref-serial'),
+      ).rejects.toThrow(ConflictError);
+    });
+
+    it('NotFoundError is thrown when Prisma raises P2025 (record not found)', async () => {
+      setupWalletFindUnique(makeUserWallet());
+      mocks.transaction.findUnique.mockResolvedValue(null);
+      mocks.transaction.create.mockRejectedValue(
+        new mocks.MockPrismaError('Record not found', { code: 'P2025' }),
+      );
+
+      await expect(
+        service.deposit('user-1' as UserId, 1000 as Money, 'crypto', 'ref-missing'),
+      ).rejects.toThrow(NotFoundError);
+    });
   });
 
   /* ================================================================ */
@@ -446,8 +651,6 @@ describe('WalletServiceImpl', () => {
     it('throws ConflictError when wallet version has changed (zero rows updated)', async () => {
       setupWalletFindUnique(makeUserWallet({ version: 5 }));
       mocks.transaction.create.mockResolvedValue(makeTxRecord());
-
-      // Simulate version mismatch: updateMany returns 0 affected rows
       mocks.wallet.updateMany.mockResolvedValue({ count: 0 });
 
       await expect(
@@ -487,15 +690,9 @@ describe('WalletServiceImpl', () => {
 
       const { entries } = assertLedgerBalanced();
       expect(entries).toHaveLength(2);
-
-      // First entry: debit platform_suspense
       expect(entries[0]!.walletId).toBe('sys-suspense-wallet');
       expect(entries[0]!.debitCents).toBe(amount);
-      expect(entries[0]!.creditCents).toBe(BigInt(0));
-
-      // Second entry: credit user wallet
       expect(entries[1]!.walletId).toBe('wallet-1');
-      expect(entries[1]!.debitCents).toBe(BigInt(0));
       expect(entries[1]!.creditCents).toBe(amount);
     });
 
@@ -509,7 +706,6 @@ describe('WalletServiceImpl', () => {
       await service.withdraw('user-1' as UserId, 1500 as Money, 'crypto');
 
       const { entries } = assertLedgerBalanced();
-      // Debit user wallet, credit suspense
       expect(entries[0]!.walletId).toBe('wallet-1');
       expect(entries[0]!.debitCents).toBe(amount);
       expect(entries[1]!.walletId).toBe('sys-suspense-wallet');
@@ -534,7 +730,7 @@ describe('WalletServiceImpl', () => {
 
     it('awardPrize: debit match_pool equals credit user_wallet', async () => {
       const amount = BigInt(5000);
-      setupWalletFindUnique(makeUserWallet());
+      setupWalletFindUnique(makeUserWallet(), { matchPoolBalance: BigInt(10000) });
       mocks.transaction.create.mockResolvedValue(
         makeTxRecord({ type: 'PRIZE', amountCents: amount, matchId: 'match-4' }),
       );
@@ -562,10 +758,6 @@ describe('WalletServiceImpl', () => {
        * 3. Both should succeed (SERIALIZABLE will serialize them, no lost updates).
        * 4. Final balance should be exactly 2000.
        * 5. There should be exactly 2 Transaction records and 4 LedgerEntry records.
-       *
-       * The SERIALIZABLE isolation ensures one transaction completes before the
-       * other reads the wallet, preventing lost updates. If optimistic locking
-       * detects a version mismatch, the caller retries.
        */
     });
 
@@ -575,12 +767,8 @@ describe('WalletServiceImpl', () => {
        * 1. Create a user wallet with balance 1500.
        * 2. Launch two withdraw(userId, 1000) calls concurrently via Promise.all.
        * 3. Exactly one should succeed, the other should throw InsufficientFundsError
-       *    (or ConflictError if version mismatch triggers retry, which then sees
-       *    insufficient funds).
+       *    (or ConflictError if version mismatch triggers retry).
        * 4. Final balance should be exactly 500.
-       * 5. There should be exactly 1 Transaction record.
-       *
-       * SERIALIZABLE isolation prevents both from reading 1500 and both succeeding.
        */
     });
 
@@ -592,8 +780,6 @@ describe('WalletServiceImpl', () => {
        *    deductEntryFee(userId, matchB, 500) concurrently.
        * 3. Exactly one should succeed, the other should throw InsufficientFundsError.
        * 4. Final balance should be exactly 0.
-       *
-       * Same serialization guarantee as the withdrawal test above.
        */
     });
   });

@@ -6,7 +6,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 **Phase:** Phase 1 — Platform Core (starting)
 **Last updated:** 2026-04-11
-**Build status:** packages/shared/, packages/database/, and packages/wallet/ complete. Codex audit of wallet money logic pending.
+**Build status:** packages/shared/, packages/database/, and packages/wallet/ complete. Codex audit fixes applied.
 
 ## What's Built
 
@@ -16,16 +16,16 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - Git remote pointed at abship/arena-platform, main branch tracking
 - packages/shared/ — types, interfaces, enums, constants, errors (all service contracts)
 - packages/database/ — Prisma schema, migrations scaffolding, seed script, client singleton
-- packages/wallet/ — double-entry bookkeeping, optimistic locking, serializable transactions
+- packages/wallet/ — double-entry bookkeeping with idempotency, rake as first-class transaction, and pre-provisioned system-wallet accounting (Codex-audited)
 
 ## In Progress
 
-- Claude Code: packages/wallet/ complete — pending Codex audit of money logic per CLAUDE.md
+- Wallet fixes complete; awaiting Codex re-audit of fixes.
 - Codex: idle — ready for Stage 2 (servers/api/)
 
 ## Next Up
 
-1. Codex audit of packages/wallet/ money logic (per CLAUDE.md "CROSS-CHECK ALL CODE")
+1. Codex re-audit of wallet fixes
 2. packages/payments/ with FakePaymentProvider (Claude Code)
 3. packages/kyc/ with FakeKYCProvider (Claude Code)
 4. packages/geolocation/ with fake + MaxMind provider (Claude Code)
@@ -117,7 +117,8 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-11:** Account signup strategy = ad-hoc, in the moment each integration needs the API key. No premature signups.
 - **2026-04-11:** Build order = games against fakes → payment processors → website → geolocation → premium infrastructure → gaming licenses. Solo-founder ship-first sequencing.
 - **2026-04-11:** `packages/database/` uses `BigInt` for all money columns to prevent overflow at scale; singleton Prisma client pattern; seed script populates 24 games and initial jurisdiction rules.
-- **2026-04-11:** `packages/wallet/` uses SERIALIZABLE isolation level on all money-mutating Prisma transactions + optimistic locking via Wallet.version column (updateMany with version in WHERE, reject on 0 rows). Double-entry ledger enforced in code: every transaction creates balanced debit/credit LedgerEntry pairs, with invariant check before write. System wallets (platform_suspense, match_pool) created lazily with synthetic user IDs for double-entry counterparty bookkeeping. Fixed `workspace:*` → `*` in database package.json (npm compat).
+- **2026-04-11:** `packages/wallet/` uses SERIALIZABLE isolation level on all money-mutating Prisma transactions + optimistic locking via Wallet.version column (updateMany with version in WHERE, reject on 0 rows). Double-entry ledger enforced in code: every transaction creates balanced debit/credit LedgerEntry pairs, with invariant check before write. Fixed `workspace:*` → `*` in database package.json (npm compat).
+- **2026-04-11:** Codex audit fixes: (1) Pre-provisioned system wallets via `WalletServiceImpl.create()` factory — no provisioning in hot-path transactions, eliminates cache-poisoning on rollback. Three system wallets: platform_suspense, match_pool, platform_revenue. (2) Double-sided balance updates — both user and system wallet balances update in every operation; match_pool checked for negative on awardPrize/collectRake. (3) Unique constraint on Transaction.referenceId for deposit idempotency + optional idempotencyKey on withdraw. (4) Rake as first-class TransactionType.RAKE via collectRake() (debit match_pool, credit platform_revenue). (5) Prisma error mapping via prisma-error-mapper.ts (P2002→ConflictError, P2025→NotFoundError, P2034→ConflictError), integer validation on amounts, pagination validation.
 
 ## Notes
 

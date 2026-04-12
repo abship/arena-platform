@@ -14,7 +14,7 @@
     "db:reset": "prisma migrate reset --force"
   },
   "dependencies": {
-    "@arena/shared": "workspace:*",
+    "@arena/shared": "*",
     "@prisma/client": "^6.7.0"
   },
   "devDependencies": {

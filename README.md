@@ -6,7 +6,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 **Phase:** Phase 1 — Platform Core (starting)
 **Last updated:** 2026-04-11
-**Build status:** packages/shared/ and packages/database/ complete. Ready for Stage 2.
+**Build status:** packages/shared/, packages/database/, and packages/wallet/ complete. Codex audit of wallet money logic pending.
 
 ## What's Built
 
@@ -16,15 +16,16 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - Git remote pointed at abship/arena-platform, main branch tracking
 - packages/shared/ — types, interfaces, enums, constants, errors (all service contracts)
 - packages/database/ — Prisma schema, migrations scaffolding, seed script, client singleton
+- packages/wallet/ — double-entry bookkeeping, optimistic locking, serializable transactions
 
 ## In Progress
 
-- Claude Code: idle — ready for Stage 2 (packages/wallet/)
+- Claude Code: packages/wallet/ complete — pending Codex audit of money logic per CLAUDE.md
 - Codex: idle — ready for Stage 2 (servers/api/)
 
 ## Next Up
 
-1. packages/wallet/ — double-entry bookkeeping (Claude Code)
+1. Codex audit of packages/wallet/ money logic (per CLAUDE.md "CROSS-CHECK ALL CODE")
 2. packages/payments/ with FakePaymentProvider (Claude Code)
 3. packages/kyc/ with FakeKYCProvider (Claude Code)
 4. packages/geolocation/ with fake + MaxMind provider (Claude Code)
@@ -116,6 +117,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-11:** Account signup strategy = ad-hoc, in the moment each integration needs the API key. No premature signups.
 - **2026-04-11:** Build order = games against fakes → payment processors → website → geolocation → premium infrastructure → gaming licenses. Solo-founder ship-first sequencing.
 - **2026-04-11:** `packages/database/` uses `BigInt` for all money columns to prevent overflow at scale; singleton Prisma client pattern; seed script populates 24 games and initial jurisdiction rules.
+- **2026-04-11:** `packages/wallet/` uses SERIALIZABLE isolation level on all money-mutating Prisma transactions + optimistic locking via Wallet.version column (updateMany with version in WHERE, reject on 0 rows). Double-entry ledger enforced in code: every transaction creates balanced debit/credit LedgerEntry pairs, with invariant check before write. System wallets (platform_suspense, match_pool) created lazily with synthetic user IDs for double-entry counterparty bookkeeping. Fixed `workspace:*` → `*` in database package.json (npm compat).
 
 ## Notes
 

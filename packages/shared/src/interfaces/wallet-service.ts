@@ -79,16 +79,19 @@ export interface WalletService {
 
   /**
    * Award prize winnings to a user's wallet after a match resolves.
+   * Optionally idempotent via idempotencyKey.
    * @param userId - The winning player
    * @param matchId - The resolved match
    * @param amountCents - Prize amount in USD cents
-   * @returns The created transaction record
+   * @param idempotencyKey - Optional key to prevent duplicate prize payouts (stored as referenceId)
+   * @returns The created or existing transaction record
    * @throws ConflictError - Transient concurrency conflict; caller may retry.
    */
   awardPrize(
     userId: UserId,
     matchId: MatchId,
     amountCents: Money,
+    idempotencyKey?: string,
   ): Promise<Transaction>;
 
   /**

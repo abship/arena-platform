@@ -24,6 +24,7 @@
  * - deposit() checks Transaction.referenceId (unique) before creating a new record.
  *   Validates userId + type match on existing record; handles P2002 race recovery.
  * - withdraw() accepts optional idempotencyKey; same validation + race recovery.
+ * - awardPrize() accepts optional idempotencyKey; same validation + race recovery.
  * - collectRake() accepts optional idempotencyKey; same pattern.
  *
  * ERROR MAPPING:
@@ -557,11 +558,13 @@ export class WalletServiceImpl implements WalletService {
   /**
    * Award prize winnings to a user's wallet after a match resolves.
    * Ledger: debit match_pool, credit user_wallet.
+   * Optionally idempotent via idempotencyKey with userId+type validation and P2002 race recovery.
    */
   async awardPrize(
     userId: UserId,
     matchId: MatchId,
     amountCents: Money,
+    idempotencyKey?: string,
   ): Promise<SharedTransaction> {
     this.validatePositiveAmount(amountCents, 'awardPrize');
 
@@ -574,6 +577,15 @@ export class WalletServiceImpl implements WalletService {
     try {
       const result = await prisma.$transaction(
         async (tx) => {
+          // Idempotency check when key provided
+          if (idempotencyKey) {
+            const existing = await tx.transaction.findUnique({ where: { referenceId: idempotencyKey } });
+            if (existing) {
+              validateIdempotentMatch(existing, userId, 'PRIZE', idempotencyKey);
+              return mapTransaction(existing);
+            }
+          }
+
           const wallet = await tx.wallet.findUnique({ where: { userId } });
           if (!wallet) {
             throw new NotFoundError('Wallet not found', { userId });
@@ -592,16 +604,34 @@ export class WalletServiceImpl implements WalletService {
             );
           }
 
-          const txRecord = await tx.transaction.create({
-            data: {
-              walletId: wallet.id,
-              userId,
-              type: 'PRIZE',
-              status: 'COMPLETED',
-              amountCents: amountBigInt,
-              matchId,
-            },
-          });
+          // Create with P2002 race recovery when idempotencyKey is set
+          let txRecord;
+          try {
+            txRecord = await tx.transaction.create({
+              data: {
+                walletId: wallet.id,
+                userId,
+                type: 'PRIZE',
+                status: 'COMPLETED',
+                amountCents: amountBigInt,
+                matchId,
+                referenceId: idempotencyKey ?? null,
+              },
+            });
+          } catch (createError: unknown) {
+            if (
+              idempotencyKey &&
+              createError instanceof Prisma.PrismaClientKnownRequestError &&
+              createError.code === 'P2002'
+            ) {
+              const raceWinner = await tx.transaction.findUnique({ where: { referenceId: idempotencyKey } });
+              if (raceWinner) {
+                validateIdempotentMatch(raceWinner, userId, 'PRIZE', idempotencyKey);
+                return mapTransaction(raceWinner);
+              }
+            }
+            throw createError;
+          }
 
           await createBalancedLedgerEntries(tx, txRecord.id, [
             { walletId: matchPoolWallet.id, debitCents: amountBigInt, creditCents: BigInt(0) },

@@ -285,6 +285,108 @@ describe('WalletServiceImpl', () => {
       setupWalletFindUnique(makeUserWallet(), { matchPoolBalance: BigInt(100) });
       await expect(service.awardPrize('user-1' as UserId, 'match-5' as MatchId, 5000 as Money)).rejects.toThrow(InsufficientFundsError);
     });
+
+    it('awardPrize with idempotencyKey creates transaction with that referenceId', async () => {
+      setupWalletFindUnique(makeUserWallet({ balanceCents: BigInt(5000), version: 5 }), { matchPoolBalance: BigInt(10000) });
+      mocks.transaction.create.mockResolvedValue(
+        makeTxRecord({ type: 'PRIZE', amountCents: BigInt(3000), matchId: 'match-2', referenceId: 'prize-match-2-user-1' }),
+      );
+
+      const result = await service.awardPrize('user-1' as UserId, 'match-2' as MatchId, 3000 as Money, 'prize-match-2-user-1');
+
+      expect(result.type).toBe('PRIZE');
+      expect(result.reference).toBe('prize-match-2-user-1');
+      expect(mocks.transaction.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ referenceId: 'prize-match-2-user-1' }),
+        }),
+      );
+      expect(mocks.wallet.updateMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('awardPrize with duplicate idempotencyKey returns existing transaction without double-awarding', async () => {
+      const existingPrize = makeTxRecord({
+        id: 'prize-existing', type: 'PRIZE', userId: 'user-1',
+        matchId: 'match-2', referenceId: 'prize-key-1',
+      });
+      setupWalletFindUnique(makeUserWallet(), { matchPoolBalance: BigInt(10000) });
+      mocks.transaction.findUnique.mockResolvedValue(existingPrize);
+
+      const result = await service.awardPrize('user-1' as UserId, 'match-2' as MatchId, 3000 as Money, 'prize-key-1');
+      expect(result.id).toBe('prize-existing');
+      expect(mocks.transaction.create).not.toHaveBeenCalled();
+      expect(mocks.wallet.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('awardPrize without idempotencyKey creates a new transaction each time (regression)', async () => {
+      setupWalletFindUnique(makeUserWallet({ balanceCents: BigInt(5000) }), { matchPoolBalance: BigInt(10000) });
+      mocks.transaction.create.mockResolvedValue(makeTxRecord({ type: 'PRIZE', amountCents: BigInt(100), matchId: 'match-3' }));
+
+      await service.awardPrize('user-1' as UserId, 'match-3' as MatchId, 100 as Money);
+      // When no idempotencyKey, findUnique for idempotency should NOT be called
+      // (the default beforeEach sets findUnique to return null, so create proceeds either way,
+      // but verify create IS called and referenceId is null)
+      expect(mocks.transaction.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ referenceId: null }),
+        }),
+      );
+    });
+
+    it('awardPrize with idempotencyKey for different userId throws ConflictError', async () => {
+      const otherUserPrize = makeTxRecord({
+        id: 'prize-other', userId: 'other-user', type: 'PRIZE', referenceId: 'prize-stolen',
+      });
+      setupWalletFindUnique(makeUserWallet(), { matchPoolBalance: BigInt(10000) });
+      mocks.transaction.findUnique.mockResolvedValue(otherUserPrize);
+
+      await expect(
+        service.awardPrize('user-1' as UserId, 'match-2' as MatchId, 3000 as Money, 'prize-stolen'),
+      ).rejects.toThrow(ConflictError);
+      expect(mocks.transaction.create).not.toHaveBeenCalled();
+      expect(mocks.wallet.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('awardPrize P2002 race recovery returns existing matching transaction', async () => {
+      const raceWinner = makeTxRecord({
+        id: 'race-prize-winner', userId: 'user-1', type: 'PRIZE', referenceId: 'prize-race-ref',
+      });
+      setupWalletFindUnique(makeUserWallet({ balanceCents: BigInt(5000) }), { matchPoolBalance: BigInt(10000) });
+      // First findUnique (idempotency check) returns null; second (race recovery) returns the winner
+      mocks.transaction.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(raceWinner);
+      mocks.transaction.create.mockRejectedValue(
+        new mocks.MockPrismaError('Unique constraint', { code: 'P2002', meta: { target: ['referenceId'] } }),
+      );
+
+      const result = await service.awardPrize('user-1' as UserId, 'match-2' as MatchId, 3000 as Money, 'prize-race-ref');
+      expect(result.id).toBe('race-prize-winner');
+      expect(mocks.wallet.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('awardPrize P2002 race recovery with different userId throws ConflictError', async () => {
+      const otherUserWinner = makeTxRecord({
+        id: 'other-prize-winner', userId: 'other-user', type: 'PRIZE', referenceId: 'prize-race-ref-2',
+      });
+      setupWalletFindUnique(makeUserWallet({ balanceCents: BigInt(5000) }), { matchPoolBalance: BigInt(10000) });
+      mocks.transaction.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(otherUserWinner);
+      mocks.transaction.create.mockRejectedValue(
+        new mocks.MockPrismaError('Unique constraint', { code: 'P2002', meta: { target: ['referenceId'] } }),
+      );
+
+      try {
+        await service.awardPrize('user-1' as UserId, 'match-2' as MatchId, 3000 as Money, 'prize-race-ref-2');
+        expect.fail('Should have thrown ConflictError');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ConflictError);
+        expect((error as ConflictError).context).toEqual(
+          expect.objectContaining({ reason: 'reference_used_by_different_request' }),
+        );
+      }
+    });
   });
 
   describe('collectRake', () => {

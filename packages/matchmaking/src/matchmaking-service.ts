@@ -7,9 +7,10 @@
  * rake collection, prize distribution, and ELO rating updates.
  *
  * KNOWN ISSUES:
- * - Partial payout on awardPrize failure after rake collected is a
- *   log-and-rethrow situation requiring operational tooling, not automatic
- *   reversal. The caller (API layer) must handle via operational tooling.
+ * - Partial payout on awardPrize failure after rake collected: resolveMatch
+ *   is now safe to retry because awardPrize accepts an idempotencyKey
+ *   (prize-${matchId}-${userId}). Operational tooling still recommended
+ *   for monitoring partial-payout retry loops.
  * - In-memory queue does not survive server restart — acceptable for
  *   Phase 1 through beta. See queue.ts for the Redis swap point.
  * - Player list recovery for resolveMatch validation uses MatchPlayer
@@ -226,9 +227,9 @@ export class InMemoryMatchmakingService implements MatchmakingService {
    * 7. Update match to RESOLVED with result
    * 8. Update ELO ratings
    *
-   * KNOWN ISSUE: If awardPrize fails after rake collected, this is a
-   * partial-payout situation. We log and rethrow — do NOT reverse rake.
-   * Operational tooling needed at the API layer.
+   * RETRY SAFETY: Each awardPrize call uses a deterministic idempotencyKey
+   * (prize-${matchId}-${userId}), so retries after partial-payout failure
+   * are safe — already-paid prizes return the existing transaction.
    */
   async resolveMatch(matchId: MatchId, result: MatchResult): Promise<Match> {
     // Read match
@@ -317,6 +318,7 @@ export class InMemoryMatchmakingService implements MatchmakingService {
           placement.userId,
           matchId,
           placement.payoutCents,
+          `prize-${matchId}-${placement.userId}`,
         );
       }
     }

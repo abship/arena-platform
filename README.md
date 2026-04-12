@@ -6,7 +6,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 **Phase:** Phase 1 — Platform Core
 **Last updated:** 2026-04-12
-**Build status:** packages/shared/, packages/database/, packages/wallet/, and packages/payments/ complete and stable. Wallet approved after 3 Codex audit rounds. Ready for packages/kyc/.
+**Build status:** packages/shared/, packages/database/, packages/wallet/, packages/payments/, and packages/kyc/ complete and stable. Wallet approved after 3 Codex audit rounds. Ready for packages/geolocation/.
 
 ## What's Built
 
@@ -18,16 +18,17 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - packages/database/ — Prisma schema, migrations scaffolding, seed script, client singleton
 - packages/wallet/ — double-entry bookkeeping with idempotency (Codex-audited through 3 review rounds), rake as first-class transaction, pre-provisioned system wallets, Prisma error mapping, unique referenceId constraint for duplicate-webhook protection
 - packages/payments/ — FakePaymentProvider + PaymentProviderFactory, wired through WalletService for realistic deposit/withdraw effects; env-var gated (`PAYMENT_PROVIDER=fake`) for one-line swap to real providers post-beta
+- packages/kyc/ — FakeKYCProvider + createKYCService factory, in-memory per-user verification state; configurable `rejectUserIds` set and `autoApproveToLevel` knobs for simulating realistic KYC outcomes in tests; env-var gated (`KYC_PROVIDER=fake`)
 
 ## In Progress
 
-- Claude Code: idle — ready for packages/kyc/ (FakeKYCProvider)
+- Claude Code: idle — ready for packages/geolocation/ (FakeGeoProvider + MaxMind)
 - Codex: idle — ready for Stage 2 (servers/api/)
 
 ## Next Up
 
 1. ~~packages/payments/ with FakePaymentProvider (Claude Code)~~ ✓ done 2026-04-12
-2. packages/kyc/ with FakeKYCProvider (Claude Code)
+2. ~~packages/kyc/ with FakeKYCProvider (Claude Code)~~ ✓ done 2026-04-12
 3. packages/geolocation/ with fake + MaxMind provider (Claude Code)
 4. packages/matchmaking/ (Claude Code)
 5. servers/api/ (Codex, Stage 2)
@@ -121,6 +122,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-11:** Codex audit round 2 fixes: Pre-provisioned system wallets via factory, double-sided balance updates, unique constraint on Transaction.referenceId, rake as TransactionType.RAKE, Prisma error mapping.
 - **2026-04-11:** Codex audit round 3 fixes: Idempotency user-mismatch protection (userId + type validation on existing transaction before returning it), P2002 race recovery (catch unique-violation on create, re-read winner, validate match), collectRake idempotency via optional idempotencyKey. Opportunistic: BigInt→String in error context, Number.isFinite guard, ConflictError documented as retryable in interface JSDoc. Approved with documented known issues below.
 - **2026-04-12:** `packages/payments/` — FakePaymentProvider + PaymentProviderFactory. Fake provider delegates all balance mutations to WalletService via DI (no direct DB access). Factory gated on `PAYMENT_PROVIDER` env var (default "fake"); real providers (BitPay, Helius, Coinbase Commerce, NOWPayments, Paysafe) get added as new switch branches post-beta. 13 tests, all passing.
+- **2026-04-12:** `packages/kyc/` — FakeKYCProvider + createKYCService factory. In-memory per-user verification state with configurable `rejectUserIds` (Set\<UserId\>) and `autoApproveToLevel` (default LEVEL_2) knobs for simulating realistic KYC approval/rejection in tests and integration flows. Age check computes from stored DOB. Factory gated on `KYC_PROVIDER` env var; Jumio gets added post-beta. 17 tests, all passing.
 
 ## Known Issues and Technical Debt
 
@@ -144,7 +146,7 @@ Realistic path from today to MVP-deployable. Each phase assumes one developer (A
 
 **Remaining (~5-8 agent sessions):**
 1. ~~packages/payments — PaymentProvider interface + FakePaymentProvider~~ ✓ done 2026-04-12
-2. packages/kyc — KYCService interface + FakeKYCProvider (Claude Code, ~30 min)
+2. ~~packages/kyc — KYCService interface + FakeKYCProvider~~ ✓ done 2026-04-12
 3. packages/geolocation — GeoService interface + MaxMindProvider + FakeGeoProvider (Claude Code, ~45 min)
 4. packages/matchmaking — ELO ratings, queue, skill-based pairing (Claude Code, ~60-90 min, Codex audit recommended — money-adjacent)
 5. servers/api — REST endpoints, JWT auth, zod validation (Codex, Stage 2, ~2-3 hou/websocket — Socket.io gateway for real-time games (Codex, ~60 min)

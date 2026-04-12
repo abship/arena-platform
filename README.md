@@ -6,7 +6,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 **Phase:** Phase 1 — Platform Core (starting)
 **Last updated:** 2026-04-11
-**Build status:** packages/shared/ complete. Ready for Stage 2.
+**Build status:** packages/shared/ and packages/database/ complete. Ready for Stage 2.
 
 ## What's Built
 
@@ -15,23 +15,22 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - Agent filters in .claude/ and .codex/
 - Git remote pointed at abship/arena-platform, main branch tracking
 - packages/shared/ — types, interfaces, enums, constants, errors (all service contracts)
+- packages/database/ — Prisma schema, migrations scaffolding, seed script, client singleton
 
 ## In Progress
 
 - Claude Code: idle — ready for Stage 2 (packages/wallet/)
-- Codex: idle — can start packages/database/ now that shared is done
+- Codex: idle — ready for Stage 2 (servers/api/)
 
 ## Next Up
 
-1. packages/database/ — Prisma schema + migrations (Codex, after shared is done)
-2. packages/wallet/ — double-entry bookkeeping (Claude Code)
-3. packages/wallet/ — double-entry bookkeeping (Claude Code)
-4. packages/payments/ with FakePaymentProvider (Claude Code)
-5. packages/kyc/ with FakeKYCProvider (Claude Code)
-6. packages/geolocation/ with fake + MaxMind provider (Claude Code)
-7. packages/matchmaking/ (Claude Code)
-8. servers/api/ (Codex, Stage 2)
-9. Integration test: signup → deposit → queue → match → play → payout
+1. packages/wallet/ — double-entry bookkeeping (Claude Code)
+2. packages/payments/ with FakePaymentProvider (Claude Code)
+3. packages/kyc/ with FakeKYCProvider (Claude Code)
+4. packages/geolocation/ with fake + MaxMind provider (Claude Code)
+5. packages/matchmaking/ (Claude Code)
+6. servers/api/ (Codex, Stage 2)
+7. Integration test: signup → deposit → queue → match → play → payout
 
 ## Blockers
 
@@ -116,6 +115,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-11:** Mercury rejected as banking option — Mercury ToS prohibits gaming. Banking decision deferred to launch prep.
 - **2026-04-11:** Account signup strategy = ad-hoc, in the moment each integration needs the API key. No premature signups.
 - **2026-04-11:** Build order = games against fakes → payment processors → website → geolocation → premium infrastructure → gaming licenses. Solo-founder ship-first sequencing.
+- **2026-04-11:** `packages/database/` uses `BigInt` for all money columns to prevent overflow at scale; singleton Prisma client pattern; seed script populates 24 games and initial jurisdiction rules.
 
 ## Notes
 

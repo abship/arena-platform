@@ -1,0 +1,221 @@
+// See ../../.env.example for DATABASE_URL configuration.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum VerificationLevel {
+  LEVEL_0
+  LEVEL_1
+  LEVEL_2
+  LEVEL_3
+  LEVEL_4
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  ENTRY_FEE
+  PRIZE
+  RAKE
+  ADJUSTMENT
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+enum GameTier {
+  TIER_1
+  TIER_2
+  TIER_3
+  TIER_4
+}
+
+enum EngineClass {
+  REAL_TIME_CONTINUOUS
+  TURN_BASED
+  ALGORITHM
+  PARALLEL
+}
+
+enum MoneyModel {
+  PROGRESSIVE_POOL
+  FIXED_POT
+  HOUSE_EDGE
+  CRASH
+  COINFLIP
+}
+
+enum MatchStatus {
+  QUEUED
+  IN_PROGRESS
+  RESOLVED
+  CANCELLED
+}
+
+model User {
+  id                String            @id @default(cuid())
+  email             String            @unique
+  username          String            @unique
+  verificationLevel VerificationLevel @default(LEVEL_1)
+  country           String
+  region            String?
+  dateOfBirth       DateTime?
+  isBanned          Boolean           @default(false)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  wallet            Wallet?
+  transactions      Transaction[]
+  matchPlayers      MatchPlayer[]
+
+  @@index([country])
+  @@index([region])
+  @@map("users")
+}
+
+model Wallet {
+  id            String        @id @default(cuid())
+  userId        String        @unique
+  balanceCents  BigInt
+  currency      String        @default("USD")
+  version       Int           @default(0)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions  Transaction[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([userId])
+  @@map("wallets")
+}
+
+model Transaction {
+  id            String            @id @default(cuid())
+  walletId      String
+  userId        String
+  type          TransactionType
+  status        TransactionStatus
+  amountCents   BigInt
+  matchId       String?
+  referenceId   String?
+  description   String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  wallet        Wallet            @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ledgerEntries LedgerEntry[]
+
+  @@index([walletId])
+  @@index([userId])
+  @@index([createdAt(sort: Desc)])
+  @@index([walletId, createdAt(sort: Desc)])
+  @@index([matchId])
+  @@index([referenceId])
+  @@map("transactions")
+}
+
+model LedgerEntry {
+  id            String      @id @default(cuid())
+  transactionId String
+  walletId      String
+  debitCents    BigInt      @default(0)
+  creditCents   BigInt      @default(0)
+  createdAt     DateTime    @default(now())
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  wallet        Wallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  // Every Transaction must have ledger entries where sum(debitCents) equals sum(creditCents).
+  // That invariant is enforced in the wallet package at the application layer.
+  @@index([transactionId])
+  @@index([walletId])
+  @@map("ledger_entries")
+}
+
+model Game {
+  id            String      @id @default(cuid())
+  slug          String      @unique
+  name          String
+  tier          GameTier
+  engineClass   EngineClass
+  moneyModel    MoneyModel
+  minPlayers    Int
+  maxPlayers    Int
+  entryFeeCents BigInt
+  isEnabled     Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  matches       Match[]
+
+  @@index([slug])
+  @@index([tier])
+  @@index([engineClass])
+  @@index([moneyModel])
+  @@index([isEnabled])
+  @@map("games")
+}
+
+model Match {
+  id            String        @id @default(cuid())
+  gameId        String
+  status        MatchStatus
+  entryFeeCents BigInt
+  poolCents     BigInt        @default(0)
+  rakeCents     BigInt        @default(0)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  resolvedAt    DateTime?
+  game          Game          @relation(fields: [gameId], references: [id], onDelete: Restrict)
+  players       MatchPlayer[]
+
+  @@index([gameId])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+  @@index([gameId, status])
+  @@map("matches")
+}
+
+model MatchPlayer {
+  id            String   @id @default(cuid())
+  matchId       String
+  userId        String
+  rating        Int
+  finalPosition Int?
+  payoutCents   BigInt?
+  joinedAt      DateTime @default(now())
+  match         Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, userId])
+  @@index([matchId])
+  @@index([userId])
+  @@index([finalPosition])
+  @@map("match_players")
+}
+
+model JurisdictionConfig {
+  id                    String   @id @default(cuid())
+  country               String
+  region                String?
+  realMoneyEnabled      Boolean
+  minAge                Int
+  allowedTiers          Int[]
+  allowedPaymentMethods String[]
+  requiresLicense       Boolean
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([country, region])
+  @@index([country])
+  @@index([region])
+  @@index([realMoneyEnabled])
+  @@map("jurisdiction_configs")
+}

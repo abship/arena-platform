@@ -30,11 +30,14 @@ export interface PaginatedResult<T> {
 export interface WalletService {
   /**
    * Deposit funds into a user's wallet.
+   * Idempotent: if a transaction with the same reference already exists for this user
+   * and type, returns the existing transaction without modifying the balance.
    * @param userId - The user receiving the deposit
    * @param amountCents - Amount to deposit in USD cents
    * @param method - Payment method used (e.g. "crypto", "stripe")
-   * @param reference - External payment provider reference ID
-   * @returns The created transaction record
+   * @param reference - External payment provider reference ID (unique, used for idempotency)
+   * @returns The created or existing transaction record
+   * @throws ConflictError - Transient concurrency conflict; caller may retry.
    */
   deposit(
     userId: UserId,
@@ -45,11 +48,13 @@ export interface WalletService {
 
   /**
    * Withdraw funds from a user's wallet.
+   * Optionally idempotent via idempotencyKey.
    * @param userId - The user requesting the withdrawal
    * @param amountCents - Amount to withdraw in USD cents
    * @param method - Payment method for the withdrawal
    * @param idempotencyKey - Optional key to prevent duplicate withdrawals (stored as referenceId)
-   * @returns The created transaction record
+   * @returns The created or existing transaction record
+   * @throws ConflictError - Transient concurrency conflict; caller may retry.
    */
   withdraw(
     userId: UserId,
@@ -64,6 +69,7 @@ export interface WalletService {
    * @param matchId - The match being joined
    * @param amountCents - Entry fee in USD cents
    * @returns The created transaction record
+   * @throws ConflictError - Transient concurrency conflict; caller may retry.
    */
   deductEntryFee(
     userId: UserId,
@@ -77,6 +83,7 @@ export interface WalletService {
    * @param matchId - The resolved match
    * @param amountCents - Prize amount in USD cents
    * @returns The created transaction record
+   * @throws ConflictError - Transient concurrency conflict; caller may retry.
    */
   awardPrize(
     userId: UserId,
@@ -88,13 +95,17 @@ export interface WalletService {
    * Record platform rake from a resolved match.
    * Ledger: debit match_pool, credit platform_revenue.
    * Called by matchmaking after a match resolves, before/with prize payouts.
+   * Optionally idempotent via idempotencyKey.
    * @param matchId - The resolved match
    * @param rakeCents - Rake amount in USD cents
-   * @returns The created transaction record
+   * @param idempotencyKey - Optional key to prevent duplicate rake collection (stored as referenceId)
+   * @returns The created or existing transaction record
+   * @throws ConflictError - Transient concurrency conflict; caller may retry.
    */
   collectRake(
     matchId: MatchId,
     rakeCents: Money,
+    idempotencyKey?: string,
   ): Promise<Transaction>;
 
   /**

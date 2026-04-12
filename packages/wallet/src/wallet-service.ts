@@ -11,14 +11,9 @@
  * - MATCH_POOL: Money in active matches. Entry fees credit it; prizes/rake debit it.
  * - PLATFORM_REVENUE: Accumulated rake. collectRake credits it.
  *
- * System wallets are provisioned once at startup via provisionSystemWallets(),
- * called by the static factory method create(). No system-wallet provisioning
- * code runs inside hot-path money transactions.
- *
  * DOUBLE-SIDED POSTING:
  * Both the user wallet AND the corresponding system wallet have their balanceCents
- * updated in every money operation. This ensures system wallet balances are accurate
- * and prevents paying out more than was collected.
+ * updated in every money operation.
  *
  * CONCURRENCY CONTROL:
  * - Every money-mutating operation runs inside a Prisma interactive transaction
@@ -27,7 +22,9 @@
  *
  * IDEMPOTENCY:
  * - deposit() checks Transaction.referenceId (unique) before creating a new record.
- * - withdraw() accepts optional idempotencyKey stored as referenceId.
+ *   Validates userId + type match on existing record; handles P2002 race recovery.
+ * - withdraw() accepts optional idempotencyKey; same validation + race recovery.
+ * - collectRake() accepts optional idempotencyKey; same pattern.
  *
  * ERROR MAPPING:
  * - Prisma errors are mapped to typed AppError subclasses via prisma-error-mapper.
@@ -80,7 +77,6 @@ interface LedgerEntryInput {
 
 /**
  * Convert a Prisma BigInt balance to the branded Money type.
- * Safe for all realistic monetary values (well within Number.MAX_SAFE_INTEGER).
  *
  * @param value - BigInt from Prisma
  * @returns Branded Money value in integer cents
@@ -166,7 +162,7 @@ async function createBalancedLedgerEntries(
   if (totalDebits !== totalCredits) {
     throw new ValidationError(
       `Double-entry invariant violated: debits=${totalDebits} credits=${totalCredits}`,
-      { transactionId, totalDebits: Number(totalDebits), totalCredits: Number(totalCredits) },
+      { transactionId, totalDebits: String(totalDebits), totalCredits: String(totalCredits) },
     );
   }
 
@@ -202,6 +198,24 @@ async function updateWalletWithOptimisticLock(
     throw new ConflictError(
       'Wallet was modified by another transaction (version mismatch)',
       { walletId, expectedVersion: currentVersion },
+    );
+  }
+}
+
+/**
+ * Validate that an existing transaction matches the expected caller for idempotent operations.
+ * Throws ConflictError if userId or type doesn't match, preventing cross-user reference reuse.
+ */
+function validateIdempotentMatch(
+  existing: { userId: string; type: string },
+  expectedUserId: string,
+  expectedType: string,
+  referenceId: string,
+): void {
+  if (existing.userId !== expectedUserId || existing.type !== expectedType) {
+    throw new ConflictError(
+      'Reference ID belongs to a different request',
+      { referenceId, reason: 'reference_used_by_different_request' },
     );
   }
 }
@@ -250,7 +264,7 @@ export class WalletServiceImpl implements WalletService {
   }
 
   private validatePositiveAmount(amountCents: Money, operation: string): void {
-    if (!Number.isInteger(amountCents)) {
+    if (!Number.isFinite(amountCents) || !Number.isInteger(amountCents)) {
       throw new ValidationError(
         `Amount must be an integer of cents for ${operation}`,
         { amountCents, operation, reason: 'must be an integer of cents' },
@@ -267,13 +281,7 @@ export class WalletServiceImpl implements WalletService {
   /**
    * Deposit funds into a user's wallet.
    * Ledger: debit platform_suspense, credit user_wallet.
-   * Idempotent: if a transaction with the same reference already exists, returns it.
-   *
-   * @param userId - The user receiving the deposit
-   * @param amountCents - Amount to deposit in USD cents (must be positive integer)
-   * @param method - Payment method used (e.g. "crypto", "stripe")
-   * @param reference - External payment provider reference ID (unique, used for idempotency)
-   * @returns The created (or existing) transaction record
+   * Idempotent via unique referenceId with userId+type validation and P2002 race recovery.
    */
   async deposit(
     userId: UserId,
@@ -292,9 +300,10 @@ export class WalletServiceImpl implements WalletService {
     try {
       const result = await prisma.$transaction(
         async (tx) => {
-          // Idempotency: return existing transaction if reference was already processed
+          // Idempotency check: return existing if reference already processed
           const existing = await tx.transaction.findUnique({ where: { referenceId: reference } });
           if (existing) {
+            validateIdempotentMatch(existing, userId, 'DEPOSIT', reference);
             return mapTransaction(existing);
           }
 
@@ -308,27 +317,40 @@ export class WalletServiceImpl implements WalletService {
             throw new NotFoundError('Platform suspense wallet not found', { walletId: this.platformSuspenseWalletId });
           }
 
-          const txRecord = await tx.transaction.create({
-            data: {
-              walletId: wallet.id,
-              userId,
-              type: 'DEPOSIT',
-              status: 'COMPLETED',
-              amountCents: amountBigInt,
-              referenceId: reference,
-              description: `Deposit via ${method}`,
-            },
-          });
+          // Create with P2002 race recovery for concurrent duplicate references
+          let txRecord;
+          try {
+            txRecord = await tx.transaction.create({
+              data: {
+                walletId: wallet.id,
+                userId,
+                type: 'DEPOSIT',
+                status: 'COMPLETED',
+                amountCents: amountBigInt,
+                referenceId: reference,
+                description: `Deposit via ${method}`,
+              },
+            });
+          } catch (createError: unknown) {
+            if (
+              createError instanceof Prisma.PrismaClientKnownRequestError &&
+              createError.code === 'P2002'
+            ) {
+              const raceWinner = await tx.transaction.findUnique({ where: { referenceId: reference } });
+              if (raceWinner) {
+                validateIdempotentMatch(raceWinner, userId, 'DEPOSIT', reference);
+                return mapTransaction(raceWinner);
+              }
+            }
+            throw createError;
+          }
 
           await createBalancedLedgerEntries(tx, txRecord.id, [
             { walletId: suspenseWallet.id, debitCents: amountBigInt, creditCents: BigInt(0) },
             { walletId: wallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
           ]);
 
-          // Update user wallet (credit)
           await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, wallet.balanceCents + amountBigInt);
-
-          // Update system wallet (debit — suspense goes negative as money enters platform)
           await updateWalletWithOptimisticLock(tx, suspenseWallet.id, suspenseWallet.version, suspenseWallet.balanceCents - amountBigInt);
 
           return mapTransaction(txRecord);
@@ -351,14 +373,7 @@ export class WalletServiceImpl implements WalletService {
   /**
    * Withdraw funds from a user's wallet.
    * Ledger: debit user_wallet, credit platform_suspense.
-   * Optionally idempotent via idempotencyKey.
-   *
-   * @param userId - The user requesting the withdrawal
-   * @param amountCents - Amount to withdraw in USD cents (must be positive integer)
-   * @param method - Payment method for the withdrawal
-   * @param idempotencyKey - Optional key to prevent duplicate withdrawals
-   * @returns The created (or existing) transaction record
-   * @throws InsufficientFundsError if balance < amount
+   * Optionally idempotent via idempotencyKey with userId+type validation and P2002 race recovery.
    */
   async withdraw(
     userId: UserId,
@@ -377,10 +392,11 @@ export class WalletServiceImpl implements WalletService {
     try {
       const result = await prisma.$transaction(
         async (tx) => {
-          // Idempotency: if key provided, check for existing withdrawal
+          // Idempotency check when key provided
           if (idempotencyKey) {
             const existing = await tx.transaction.findUnique({ where: { referenceId: idempotencyKey } });
             if (existing) {
+              validateIdempotentMatch(existing, userId, 'WITHDRAWAL', idempotencyKey);
               return mapTransaction(existing);
             }
           }
@@ -406,27 +422,41 @@ export class WalletServiceImpl implements WalletService {
             throw new NotFoundError('Platform suspense wallet not found', { walletId: this.platformSuspenseWalletId });
           }
 
-          const txRecord = await tx.transaction.create({
-            data: {
-              walletId: wallet.id,
-              userId,
-              type: 'WITHDRAWAL',
-              status: 'COMPLETED',
-              amountCents: amountBigInt,
-              referenceId: idempotencyKey ?? null,
-              description: `Withdrawal via ${method}`,
-            },
-          });
+          // Create with P2002 race recovery when idempotencyKey is set
+          let txRecord;
+          try {
+            txRecord = await tx.transaction.create({
+              data: {
+                walletId: wallet.id,
+                userId,
+                type: 'WITHDRAWAL',
+                status: 'COMPLETED',
+                amountCents: amountBigInt,
+                referenceId: idempotencyKey ?? null,
+                description: `Withdrawal via ${method}`,
+              },
+            });
+          } catch (createError: unknown) {
+            if (
+              idempotencyKey &&
+              createError instanceof Prisma.PrismaClientKnownRequestError &&
+              createError.code === 'P2002'
+            ) {
+              const raceWinner = await tx.transaction.findUnique({ where: { referenceId: idempotencyKey } });
+              if (raceWinner) {
+                validateIdempotentMatch(raceWinner, userId, 'WITHDRAWAL', idempotencyKey);
+                return mapTransaction(raceWinner);
+              }
+            }
+            throw createError;
+          }
 
           await createBalancedLedgerEntries(tx, txRecord.id, [
             { walletId: wallet.id, debitCents: amountBigInt, creditCents: BigInt(0) },
             { walletId: suspenseWallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
           ]);
 
-          // Update user wallet (debit)
           await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, wallet.balanceCents - amountBigInt);
-
-          // Update system wallet (credit — money leaves platform)
           await updateWalletWithOptimisticLock(tx, suspenseWallet.id, suspenseWallet.version, suspenseWallet.balanceCents + amountBigInt);
 
           return mapTransaction(txRecord);
@@ -449,12 +479,6 @@ export class WalletServiceImpl implements WalletService {
   /**
    * Deduct an entry fee from a user's wallet when they join a match.
    * Ledger: debit user_wallet, credit match_pool.
-   *
-   * @param userId - The player joining the match
-   * @param matchId - The match being joined
-   * @param amountCents - Entry fee in USD cents (must be positive integer)
-   * @returns The created transaction record
-   * @throws InsufficientFundsError if balance < fee
    */
   async deductEntryFee(
     userId: UserId,
@@ -509,10 +533,7 @@ export class WalletServiceImpl implements WalletService {
             { walletId: matchPoolWallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
           ]);
 
-          // Update user wallet (debit)
           await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, wallet.balanceCents - amountBigInt);
-
-          // Update system wallet (credit — money enters match pool)
           await updateWalletWithOptimisticLock(tx, matchPoolWallet.id, matchPoolWallet.version, matchPoolWallet.balanceCents + amountBigInt);
 
           return mapTransaction(txRecord);
@@ -536,12 +557,6 @@ export class WalletServiceImpl implements WalletService {
   /**
    * Award prize winnings to a user's wallet after a match resolves.
    * Ledger: debit match_pool, credit user_wallet.
-   *
-   * @param userId - The winning player
-   * @param matchId - The resolved match
-   * @param amountCents - Prize amount in USD cents (must be positive integer)
-   * @returns The created transaction record
-   * @throws InsufficientFundsError if match_pool balance < prize amount
    */
   async awardPrize(
     userId: UserId,
@@ -569,7 +584,6 @@ export class WalletServiceImpl implements WalletService {
             throw new NotFoundError('Match pool wallet not found', { walletId: this.matchPoolWalletId });
           }
 
-          // Check match pool has sufficient funds
           const newMatchPoolBalance = matchPoolWallet.balanceCents - amountBigInt;
           if (newMatchPoolBalance < BigInt(0)) {
             throw new InsufficientFundsError(
@@ -594,10 +608,7 @@ export class WalletServiceImpl implements WalletService {
             { walletId: wallet.id, debitCents: BigInt(0), creditCents: amountBigInt },
           ]);
 
-          // Update user wallet (credit)
           await updateWalletWithOptimisticLock(tx, wallet.id, wallet.version, wallet.balanceCents + amountBigInt);
-
-          // Update system wallet (debit)
           await updateWalletWithOptimisticLock(tx, matchPoolWallet.id, matchPoolWallet.version, newMatchPoolBalance);
 
           return mapTransaction(txRecord);
@@ -621,16 +632,12 @@ export class WalletServiceImpl implements WalletService {
   /**
    * Record platform rake from a resolved match.
    * Ledger: debit match_pool, credit platform_revenue.
-   * Does not compute rake — the caller passes the computed amount.
-   *
-   * @param matchId - The resolved match
-   * @param rakeCents - Rake amount in USD cents (must be positive integer)
-   * @returns The created transaction record
-   * @throws InsufficientFundsError if match_pool balance < rake amount
+   * Optionally idempotent via idempotencyKey with matchId validation and P2002 race recovery.
    */
   async collectRake(
     matchId: MatchId,
     rakeCents: Money,
+    idempotencyKey?: string,
   ): Promise<SharedTransaction> {
     this.validatePositiveAmount(rakeCents, 'collectRake');
 
@@ -643,6 +650,20 @@ export class WalletServiceImpl implements WalletService {
     try {
       const result = await prisma.$transaction(
         async (tx) => {
+          // Idempotency check when key provided
+          if (idempotencyKey) {
+            const existing = await tx.transaction.findUnique({ where: { referenceId: idempotencyKey } });
+            if (existing) {
+              if (existing.type !== 'RAKE' || existing.matchId !== matchId) {
+                throw new ConflictError(
+                  'Reference ID belongs to a different request',
+                  { referenceId: idempotencyKey, reason: 'reference_used_by_different_request' },
+                );
+              }
+              return mapTransaction(existing);
+            }
+          }
+
           const matchPoolWallet = await tx.wallet.findUnique({ where: { id: this.matchPoolWalletId } });
           if (!matchPoolWallet) {
             throw new NotFoundError('Match pool wallet not found', { walletId: this.matchPoolWalletId });
@@ -653,7 +674,6 @@ export class WalletServiceImpl implements WalletService {
             throw new NotFoundError('Platform revenue wallet not found', { walletId: this.platformRevenueWalletId });
           }
 
-          // Check match pool has sufficient funds
           const newMatchPoolBalance = matchPoolWallet.balanceCents - rakeBigInt;
           if (newMatchPoolBalance < BigInt(0)) {
             throw new InsufficientFundsError(
@@ -662,26 +682,45 @@ export class WalletServiceImpl implements WalletService {
             );
           }
 
-          const txRecord = await tx.transaction.create({
-            data: {
-              walletId: matchPoolWallet.id,
-              userId: matchPoolWallet.userId,
-              type: 'RAKE',
-              status: 'COMPLETED',
-              amountCents: rakeBigInt,
-              matchId,
-            },
-          });
+          let txRecord;
+          try {
+            txRecord = await tx.transaction.create({
+              data: {
+                walletId: matchPoolWallet.id,
+                userId: matchPoolWallet.userId,
+                type: 'RAKE',
+                status: 'COMPLETED',
+                amountCents: rakeBigInt,
+                matchId,
+                referenceId: idempotencyKey ?? null,
+              },
+            });
+          } catch (createError: unknown) {
+            if (
+              idempotencyKey &&
+              createError instanceof Prisma.PrismaClientKnownRequestError &&
+              createError.code === 'P2002'
+            ) {
+              const raceWinner = await tx.transaction.findUnique({ where: { referenceId: idempotencyKey } });
+              if (raceWinner) {
+                if (raceWinner.type !== 'RAKE' || raceWinner.matchId !== matchId) {
+                  throw new ConflictError(
+                    'Reference ID belongs to a different request',
+                    { referenceId: idempotencyKey, reason: 'reference_used_by_different_request' },
+                  );
+                }
+                return mapTransaction(raceWinner);
+              }
+            }
+            throw createError;
+          }
 
           await createBalancedLedgerEntries(tx, txRecord.id, [
             { walletId: matchPoolWallet.id, debitCents: rakeBigInt, creditCents: BigInt(0) },
             { walletId: revenueWallet.id, debitCents: BigInt(0), creditCents: rakeBigInt },
           ]);
 
-          // Update match pool (debit)
           await updateWalletWithOptimisticLock(tx, matchPoolWallet.id, matchPoolWallet.version, newMatchPoolBalance);
-
-          // Update revenue (credit)
           await updateWalletWithOptimisticLock(tx, revenueWallet.id, revenueWallet.version, revenueWallet.balanceCents + rakeBigInt);
 
           return mapTransaction(txRecord);
@@ -704,10 +743,6 @@ export class WalletServiceImpl implements WalletService {
 
   /**
    * Get a user's current wallet with balance.
-   *
-   * @param userId - The user to look up
-   * @returns The user's wallet
-   * @throws NotFoundError if the wallet does not exist
    */
   async getBalance(userId: UserId): Promise<SharedWallet> {
     try {
@@ -725,12 +760,6 @@ export class WalletServiceImpl implements WalletService {
 
   /**
    * Get a user's paginated transaction history, ordered by createdAt descending.
-   *
-   * @param userId - The user whose history to retrieve
-   * @param pagination - Offset and limit for paging (limit capped at 100, default 50)
-   * @returns Paginated list of transactions
-   * @throws NotFoundError if the wallet does not exist
-   * @throws ValidationError if pagination values are invalid
    */
   async getTransactionHistory(
     userId: UserId,

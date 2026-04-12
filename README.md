@@ -4,9 +4,9 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 ## Current Status
 
-**Phase:** Phase 1 — Platform Core (starting)
+**Phase:** Phase 1 — Platform Core
 **Last updated:** 2026-04-11
-**Build status:** packages/shared/, packages/database/, and packages/wallet/ complete. Codex audit fixes applied.
+**Build status:** packages/shared/, packages/database/, and packages/wallet/ complete and stable. Wallet finalized after 3 Codex audit rounds. Ready for packages/payments/.
 
 ## What's Built
 
@@ -16,22 +16,21 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - Git remote pointed at abship/arena-platform, main branch tracking
 - packages/shared/ — types, interfaces, enums, constants, errors (all service contracts)
 - packages/database/ — Prisma schema, migrations scaffolding, seed script, client singleton
-- packages/wallet/ — double-entry bookkeeping with idempotency, rake as first-class transaction, and pre-provisioned system-wallet accounting (Codex-audited)
+- packages/wallet/ — double-entry bookkeeping with idempotency (Codex-audited through 3 review rounds), rake as first-class transaction, pre-provisioned system wallets, Prisma error mapping, unique referenceId constraint for duplicate-webhook protection
 
 ## In Progress
 
-- Wallet fixes complete; awaiting Codex re-audit of fixes.
+- Claude Code: idle — ready for packages/payments/ (FakePaymentProvider)
 - Codex: idle — ready for Stage 2 (servers/api/)
 
 ## Next Up
 
-1. Codex re-audit of wallet fixes
-2. packages/payments/ with FakePaymentProvider (Claude Code)
-3. packages/kyc/ with FakeKYCProvider (Claude Code)
-4. packages/geolocation/ with fake + MaxMind provider (Claude Code)
-5. packages/matchmaking/ (Claude Code)
-6. servers/api/ (Codex, Stage 2)
-7. Integration test: signup → deposit → queue → match → play → payout
+1. packages/payments/ with FakePaymentProvider (Claude Code)
+2. packages/kyc/ with FakeKYCProvider (Claude Code)
+3. packages/geolocation/ with fake + MaxMind provider (Claude Code)
+4. packages/matchmaking/ (Claude Code)
+5. servers/api/ (Codex, Stage 2)
+6. Integration test: signup → deposit → queue → match → play → payout
 
 ## Blockers
 
@@ -118,7 +117,20 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-11:** Build order = games against fakes → payment processors → website → geolocation → premium infrastructure → gaming licenses. Solo-founder ship-first sequencing.
 - **2026-04-11:** `packages/database/` uses `BigInt` for all money columns to prevent overflow at scale; singleton Prisma client pattern; seed script populates 24 games and initial jurisdiction rules.
 - **2026-04-11:** `packages/wallet/` uses SERIALIZABLE isolation level on all money-mutating Prisma transactions + optimistic locking via Wallet.version column (updateMany with version in WHERE, reject on 0 rows). Double-entry ledger enforced in code: every transaction creates balanced debit/credit LedgerEntry pairs, with invariant check before write. Fixed `workspace:*` → `*` in database package.json (npm compat).
-- **2026-04-11:** Codex audit fixes: (1) Pre-provisioned system wallets via `WalletServiceImpl.create()` factory — no provisioning in hot-path transactions, eliminates cache-poisoning on rollback. Three system wallets: platform_suspense, match_pool, platform_revenue. (2) Double-sided balance updates — both user and system wallet balances update in every operation; match_pool checked for negative on awardPrize/collectRake. (3) Unique constraint on Transaction.referenceId for deposit idempotency + optional idempotencyKey on withdraw. (4) Rake as first-class TransactionType.RAKE via collectRake() (debit match_pool, credit platform_revenue). (5) Prisma error mapping via prisma-error-mapper.ts (P2002→ConflictError, P2025→NotFoundError, P2034→ConflictError), integer validation on amounts, pagination validation.
+- **2026-04-11:** Codex audit round 2 fixes: Pre-provisioned system wallets via factory, double-sided balance updates, unique constraint on Transaction.referenceId, rake as TransactionType.RAKE, Prisma error mapping.
+- **2026-04-11:** Codex audit round 3 fixes: Idempotency user-mismatch protection (userId + type validation on existing transaction before returning it), P2002 race recovery (catch unique-violation on create, re-read winner, validate match), collectRake idempotency via optional idempotencyKey. Opportunistic: BigInt→String in error context, Number.isFinite guard, ConflictError documented as retryable in interface JSDoc. Approved with documented known issues below.
+
+## Known Issues and Technical Debt
+
+### Wallet Package
+- **No multi-currency validation.** Wallet.currency field exists but isn't checked during money mutations. All operations assume USD. Safe while Arena.gg is USD-only; needs fix before supporting EUR/GBP/etc.
+- **Mocked tests only.** The test suite uses a mocked Prisma client. Real race conditions, Prisma serialization failures, and Postgres constraint enforcement are not covered by automated tests. Needs real-database integration tests (docker-compose Postgres or testcontainers) before scaling to significant production volume.
+- **Money type is Number, database is BigInt.** The shared Money type is a branded number. Safe up to ~$90 trillion (JavaScript safe integer max in cents). Change to BigInt end-to-end before Arena.gg could plausibly handle that kind of aggregate volume.
+- **ConflictError retry is caller's responsibility.** The wallet package does not automatically retry on serialization failures or optimistic-lock mismatches. Callers must catch ConflictError and retry with their own backoff. Document this in API route handlers when servers/api/ is built.
+
+### CI / Testing
+- **No integration tests.** CI runs typecheck, build, and mocked unit tests. No end-to-end test of deposit → match → payout flow against a real database.
+- **Node 20 action deprecated June 2026.** .github/workflows/ci.yml uses actions/checkout@v4 and actions/setup-node@v4 on node-version: 20. GitHub will force Node 24 by June 2, 2026. Bump to 24 before then.
 
 ## Notes
 

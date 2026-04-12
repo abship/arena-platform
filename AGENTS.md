@@ -68,6 +68,10 @@ Stage 6 (Frontend):
 - Claude Code owns: apps/web/ pages, layouts, component generation
 - Coordinate with user if both need to edit the same file
 
+## Triggered Edits (WHEN-THEN.md)
+
+WHEN-THEN.md at the repo root is a living queue of "when X happens, change Y" entries. Before starting any task, scan WHEN-THEN.md to check if the work you're about to do fires a trigger. After completing a task, check again — your work may have created a new trigger condition. If you complete a triggered edit, mark it done in WHEN-THEN.md.
+
 ## Game Engine Classes
 
 ### Engine Class A — Real-Time Continuous

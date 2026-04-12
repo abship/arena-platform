@@ -356,3 +356,4 @@ These estimates assume daily work, functioning AI agents, no major rewrites, and
 - All code goes through Cursor agents so they can test locally before pushing. Planning chats only edit text files (this README, ARENA-GG-INFO-FILE) via GitHub connector when needed.
 - Territory rules per CLAUDE.md "Dual-Agent Coordination" section are strictly enforced.
 - When a deferred service is signed up and ready to integrate, consult the Deferred Integration Points section for exact file-level swap steps. Keep that section updated as the codebase evolves.
+- WHEN-THEN.md at the repo root tracks triggered edits — "when X happens, change Y." Planning chats and agent sessions scan it to catch triggers that may have fired. Keeps decisions from getting lost in chat history.

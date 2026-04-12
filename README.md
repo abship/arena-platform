@@ -6,7 +6,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 **Phase:** Phase 1 — Platform Core
 **Last updated:** 2026-04-12
-**Build status:** packages/shared/, packages/database/, packages/wallet/, packages/payments/, and packages/kyc/ complete and stable. Wallet approved after 3 Codex audit rounds. Ready for packages/geolocation/.
+**Build status:** packages/shared/, packages/database/, packages/wallet/, packages/payments/, packages/kyc/, and packages/geolocation/ complete and stable. Wallet approved after 3 Codex audit rounds. Ready for packages/matchmaking/.
 
 ## What's Built
 
@@ -19,17 +19,18 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - packages/wallet/ — double-entry bookkeeping with idempotency (Codex-audited through 3 review rounds), rake as first-class transaction, pre-provisioned system wallets, Prisma error mapping, unique referenceId constraint for duplicate-webhook protection
 - packages/payments/ — FakePaymentProvider + PaymentProviderFactory, wired through WalletService for realistic deposit/withdraw effects; env-var gated (`PAYMENT_PROVIDER=fake`) for one-line swap to real providers post-beta
 - packages/kyc/ — FakeKYCProvider + createKYCService factory, in-memory per-user verification state; configurable `rejectUserIds` set and `autoApproveToLevel` knobs for simulating realistic KYC outcomes in tests; env-var gated (`KYC_PROVIDER=fake`)
+- packages/geolocation/ — FakeGeoProvider + injectable RulesSource; DEFAULT_RULES_SOURCE blocks 11 US states (AZ, AR, CT, DE, IA, LA, MT, SC, SD, TN, VT) and GB (no UKGC license). MaxMind provider NOT built yet — deferred pending ad-hoc signup; GeoComply will be its own package post-beta. Env-var gated (`GEO_PROVIDER=fake`)
 
 ## In Progress
 
-- Claude Code: idle — ready for packages/geolocation/ (FakeGeoProvider + MaxMind)
+- Claude Code: idle — ready for packages/matchmaking/
 - Codex: idle — ready for Stage 2 (servers/api/)
 
 ## Next Up
 
 1. ~~packages/payments/ with FakePaymentProvider (Claude Code)~~ ✓ done 2026-04-12
 2. ~~packages/kyc/ with FakeKYCProvider (Claude Code)~~ ✓ done 2026-04-12
-3. packages/geolocation/ with fake + MaxMind provider (Claude Code)
+3. ~~packages/geolocation/ with FakeGeoProvider (Claude Code)~~ ✓ done 2026-04-12
 4. packages/matchmaking/ (Claude Code)
 5. servers/api/ (Codex, Stage 2)
 6. Integration test: signup → deposit → queue → match → play → payout
@@ -77,7 +78,7 @@ None.
 
 Sign up in the moment the agent needs the API key during integration. No point signing up early.
 
-- **MaxMind GeoLite2** — sign up when building packages/geolocation/ real provider
+- **MaxMind GeoLite2** — sign up when building MaxMindProvider. Interface is ready in packages/geolocation/; swap-in point is geo-service-factory.ts (single switch-case branch). Signup just unlocks the real provider implementation
 - **Sentry** — sign up when deploying beta and wanting real error monitoring
 - **PostHog** — sign up when building the website and wanting analytics
 - **Resend** — sign up when building real transactional email (verification, match notifications)
@@ -93,7 +94,8 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **BitPay merchant** — after beta works with fake money, needs business bank account
 - **Paysafe, Nuvei, Finix** — after beta, card processors want to see live product
 - **Jumio** — after beta, KYC vendor wants integration context
-- **GeoComply, Xpoint** — after gaming license application started, enterprise sales
+- **GeoComply** — separate package (fundamentally different shape: signed device assertions with client SDK, not IP lookup), required for licensed US states (NJ/PA/MI), post-beta only. Enterprise sales after gaming license application started
+- **Xpoint** — after gaming license application started, enterprise sales
 - **Elliptic** — when processing real crypto volume
 - **Bench, Pilot, or Kruze CPA** — when real expenses justify bookkeeping
 - **Ifrah Law, Walters Law Group intro calls** — after beta deployed, when there's a product to describe
@@ -123,6 +125,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-11:** Codex audit round 3 fixes: Idempotency user-mismatch protection (userId + type validation on existing transaction before returning it), P2002 race recovery (catch unique-violation on create, re-read winner, validate match), collectRake idempotency via optional idempotencyKey. Opportunistic: BigInt→String in error context, Number.isFinite guard, ConflictError documented as retryable in interface JSDoc. Approved with documented known issues below.
 - **2026-04-12:** `packages/payments/` — FakePaymentProvider + PaymentProviderFactory. Fake provider delegates all balance mutations to WalletService via DI (no direct DB access). Factory gated on `PAYMENT_PROVIDER` env var (default "fake"); real providers (BitPay, Helius, Coinbase Commerce, NOWPayments, Paysafe) get added as new switch branches post-beta. 13 tests, all passing.
 - **2026-04-12:** `packages/kyc/` — FakeKYCProvider + createKYCService factory. In-memory per-user verification state with configurable `rejectUserIds` (Set\<UserId\>) and `autoApproveToLevel` (default LEVEL_2) knobs for simulating realistic KYC approval/rejection in tests and integration flows. Age check computes from stored DOB. Factory gated on `KYC_PROVIDER` env var; Jumio gets added post-beta. 17 tests, all passing.
+- **2026-04-12:** `packages/geolocation/` — shipped with FakeGeoProvider only; MaxMindProvider deferred pending signup (will be single-branch add to factory when done); GeoComply explicitly scoped as separate package post-beta due to fundamentally different shape (signed device assertions vs IP lookup); RulesSource injection pattern decouples jurisdiction policy from location lookup; blocked US state list (AZ, AR, CT, DE, IA, LA, MT, SC, SD, TN, VT) and GB baked into DEFAULT_RULES_SOURCE. 31 tests, all passing.
 
 ## Known Issues and Technical Debt
 
@@ -147,7 +150,8 @@ Realistic path from today to MVP-deployable. Each phase assumes one developer (A
 **Remaining (~5-8 agent sessions):**
 1. ~~packages/payments — PaymentProvider interface + FakePaymentProvider~~ ✓ done 2026-04-12
 2. ~~packages/kyc — KYCService interface + FakeKYCProvider~~ ✓ done 2026-04-12
-3. packages/geolocation — GeoService interface + MaxMindProvider + FakeGeoProvider (Claude Code, ~45 min)
+3. ~~packages/geolocation — FakeGeoProvider + injectable RulesSource~~ ✓ done 2026-04-12 (MaxMindProvider deferred pending account signup — will be single-branch add to factory)
+3b. MaxMind integration — sign up for GeoLite2 account, implement MaxMindProvider as new switch-case branch in geo-service-factory.ts (future, post-signup)
 4. packages/matchmaking — ELO ratings, queue, skill-based pairing (Claude Code, ~60-90 min, Codex audit recommended — money-adjacent)
 5. servers/api — REST endpoints, JWT auth, zod validation (Codex, Stage 2, ~2-3 hou/websocket — Socket.io gateway for real-time games (Codex, ~60 min)
 7. servers/game-server — engine base classes (Real-time, Turn-based, Algorithm, Parallel) (Claude Code, ~2-3 hours)

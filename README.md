@@ -6,7 +6,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 **Phase:** Phase 1 — Platform Core
 **Last updated:** 2026-04-12
-**Build status:** packages/shared/, packages/database/, and packages/wallet/ complete and stable. Wallet approved after 3 Codex audit rounds. Ready for packages/payments/.
+**Build status:** packages/shared/, packages/database/, packages/wallet/, and packages/payments/ complete and stable. Wallet approved after 3 Codex audit rounds. Ready for packages/kyc/.
 
 ## What's Built
 
@@ -17,15 +17,16 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - packages/shared/ — types, interfaces, enums, constants, errors (all service contracts)
 - packages/database/ — Prisma schema, migrations scaffolding, seed script, client singleton
 - packages/wallet/ — double-entry bookkeeping with idempotency (Codex-audited through 3 review rounds), rake as first-class transaction, pre-provisioned system wallets, Prisma error mapping, unique referenceId constraint for duplicate-webhook protection
+- packages/payments/ — FakePaymentProvider + PaymentProviderFactory, wired through WalletService for realistic deposit/withdraw effects; env-var gated (`PAYMENT_PROVIDER=fake`) for one-line swap to real providers post-beta
 
 ## In Progress
 
-- Claude Code: idle — ready for packages/payments/ (FakePaymentProvider)
+- Claude Code: idle — ready for packages/kyc/ (FakeKYCProvider)
 - Codex: idle — ready for Stage 2 (servers/api/)
 
 ## Next Up
 
-1. packages/payments/ with FakePaymentProvider (Claude Code)
+1. ~~packages/payments/ with FakePaymentProvider (Claude Code)~~ ✓ done 2026-04-12
 2. packages/kyc/ with FakeKYCProvider (Claude Code)
 3. packages/geolocation/ with fake + MaxMind provider (Claude Code)
 4. packages/matchmaking/ (Claude Code)
@@ -119,6 +120,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-11:** `packages/wallet/` uses SERIALIZABLE isolation level on all money-mutating Prisma transactions + optimistic locking via Wallet.version column (updateMany with version in WHERE, reject on 0 rows). Double-entry ledger enforced in code: every transaction creates balanced debit/credit LedgerEntry pairs, with invariant check before write. Fixed `workspace:*` → `*` in database package.json (npm compat).
 - **2026-04-11:** Codex audit round 2 fixes: Pre-provisioned system wallets via factory, double-sided balance updates, unique constraint on Transaction.referenceId, rake as TransactionType.RAKE, Prisma error mapping.
 - **2026-04-11:** Codex audit round 3 fixes: Idempotency user-mismatch protection (userId + type validation on existing transaction before returning it), P2002 race recovery (catch unique-violation on create, re-read winner, validate match), collectRake idempotency via optional idempotencyKey. Opportunistic: BigInt→String in error context, Number.isFinite guard, ConflictError documented as retryable in interface JSDoc. Approved with documented known issues below.
+- **2026-04-12:** `packages/payments/` — FakePaymentProvider + PaymentProviderFactory. Fake provider delegates all balance mutations to WalletService via DI (no direct DB access). Factory gated on `PAYMENT_PROVIDER` env var (default "fake"); real providers (BitPay, Helius, Coinbase Commerce, NOWPayments, Paysafe) get added as new switch branches post-beta. 13 tests, all passing.
 
 ## Known Issues and Technical Debt
 
@@ -141,7 +143,7 @@ Realistic path from today to MVP-deployable. Each phase assumes one developer (A
 **Done:** packages/shared, packages/database, packages/wallet (Codex-approved after 3 audit rounds)
 
 **Remaining (~5-8 agent sessions):**
-1. packages/payments — PaymentProvider interface + FakePaymentProvider (Claude Code, ~30 min)
+1. ~~packages/payments — PaymentProvider interface + FakePaymentProvider~~ ✓ done 2026-04-12
 2. packages/kyc — KYCService interface + FakeKYCProvider (Claude Code, ~30 min)
 3. packages/geolocation — GeoService interface + MaxMindProvider + FakeGeoProvider (Claude Code, ~45 min)
 4. packages/matchmaking — ELO ratings, queue, skill-based pairing (Claude Code, ~60-90 min, Codex audit recommended — money-adjacent)

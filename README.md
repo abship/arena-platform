@@ -6,7 +6,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 **Phase:** Phase 1 — Platform Core (starting)
 **Last updated:** 2026-04-11
-**Build status:** Scaffolding in place. Ready to start packages/shared/.
+**Build status:** packages/shared/ complete. Ready for Stage 2.
 
 ## What's Built
 
@@ -14,16 +14,17 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - Agent instruction files: CLAUDE.md, AGENTS.md
 - Agent filters in .claude/ and .codex/
 - Git remote pointed at abship/arena-platform, main branch tracking
+- packages/shared/ — types, interfaces, enums, constants, errors (all service contracts)
 
 ## In Progress
 
-- Claude Code: (none — about to start packages/shared/)
-- Codex: idle during Phase 1 (per CLAUDE.md Stage 1 territory rules)
+- Claude Code: idle — ready for Stage 2 (packages/wallet/)
+- Codex: idle — can start packages/database/ now that shared is done
 
 ## Next Up
 
-1. packages/shared/ — all TypeScript types, interfaces, enums, constants, error classes (Claude Code)
-2. packages/database/ — Prisma schema + migrations (Codex, after shared is done)
+1. packages/database/ — Prisma schema + migrations (Codex, after shared is done)
+2. packages/wallet/ — double-entry bookkeeping (Claude Code)
 3. packages/wallet/ — double-entry bookkeeping (Claude Code)
 4. packages/payments/ with FakePaymentProvider (Claude Code)
 5. packages/kyc/ with FakeKYCProvider (Claude Code)

@@ -592,9 +592,114 @@ describe('InMemoryMatchmakingService', () => {
       ]);
     });
 
-    it('mid-payout failure recovery: retry succeeds via idempotencyKey without double-awarding', async () => {
-      // 3-player match: user1 wins 828, user2 gets 0, user3 gets 0 (WTA with 3 players)
-      // But we'll use 2-player match for simplicity — user1 wins 920
+    it('multi-prize retry reuses deterministic idempotency keys and does not double-award earlier winners', async () => {
+      calculators.set(gameId, new BattleRoyaleTopThreeCalculator());
+      prisma.match.findUnique.mockResolvedValue(
+        makeMatchRow({
+          poolCents: BigInt(1840),
+          rakeCents: BigInt(160),
+          players: [
+            { id: 'mp-1', matchId: 'match-uuid', userId: 'user-1', rating: 1200 },
+            { id: 'mp-2', matchId: 'match-uuid', userId: 'user-2', rating: 1200 },
+            { id: 'mp-3', matchId: 'match-uuid', userId: 'user-3', rating: 1200 },
+            { id: 'mp-4', matchId: 'match-uuid', userId: 'user-4', rating: 1200 },
+          ],
+        }),
+      );
+
+      const result: MatchResult = [
+        { userId: user1, position: 1, payoutCents: 0 as Money },
+        { userId: user2, position: 2, payoutCents: 0 as Money },
+        { userId: user3, position: 3, payoutCents: 0 as Money },
+        { userId: user4, position: 4, payoutCents: 0 as Money },
+      ];
+
+      const prizeMutationCounts = new Map<string, number>();
+      const seenPrizeKeys = new Set<string>();
+      const seenRakeKeys = new Set<string>();
+      let failSecondPrizeOnce = true;
+
+      (walletService.collectRake as ReturnType<typeof vi.fn>).mockImplementation(
+        async (
+          calledMatchId: MatchId,
+          _amountCents: Money,
+          idempotencyKey?: string,
+        ) => {
+          expect(calledMatchId).toBe(matchId);
+          expect(idempotencyKey).toBe(`rake-${matchId}`);
+
+          if (idempotencyKey && seenRakeKeys.has(idempotencyKey)) {
+            return { id: `existing-${idempotencyKey}` };
+          }
+
+          if (idempotencyKey) {
+            seenRakeKeys.add(idempotencyKey);
+          }
+
+          return { id: `new-${idempotencyKey}` };
+        },
+      );
+
+      (walletService.awardPrize as ReturnType<typeof vi.fn>).mockImplementation(
+        async (
+          awardedUserId: UserId,
+          calledMatchId: MatchId,
+          amountCents: Money,
+          idempotencyKey?: string,
+        ) => {
+          expect(calledMatchId).toBe(matchId);
+          expect(idempotencyKey).toBe(`prize-${matchId}-${awardedUserId}`);
+
+          if (!idempotencyKey) {
+            throw new Error('Missing idempotencyKey');
+          }
+
+          if (awardedUserId === user2 && failSecondPrizeOnce) {
+            failSecondPrizeOnce = false;
+            throw new Error('user2 payout failed');
+          }
+
+          if (seenPrizeKeys.has(idempotencyKey)) {
+            return { id: `existing-${idempotencyKey}`, amountCents, reference: idempotencyKey };
+          }
+
+          seenPrizeKeys.add(idempotencyKey);
+          prizeMutationCounts.set(
+            idempotencyKey,
+            (prizeMutationCounts.get(idempotencyKey) ?? 0) + 1,
+          );
+
+          return { id: `new-${idempotencyKey}`, amountCents, reference: idempotencyKey };
+        },
+      );
+
+      await expect(service.resolveMatch(matchId, result)).rejects.toThrow('user2 payout failed');
+      expect(prisma.match.update).not.toHaveBeenCalled();
+
+      const retryMatch = await service.resolveMatch(matchId, result);
+      expect(retryMatch.status).toBe(MatchStatus.RESOLVED);
+      expect(retryMatch.result).toEqual([
+        { userId: user1, position: 1, payoutCents: 1104 },
+        { userId: user2, position: 2, payoutCents: 460 },
+        { userId: user3, position: 3, payoutCents: 276 },
+        { userId: user4, position: 4, payoutCents: 0 },
+      ]);
+
+      expect((walletService.awardPrize as ReturnType<typeof vi.fn>).mock.calls).toEqual([
+        [user1, matchId, 1104, `prize-${matchId}-${user1}`],
+        [user2, matchId, 460, `prize-${matchId}-${user2}`],
+        [user1, matchId, 1104, `prize-${matchId}-${user1}`],
+        [user2, matchId, 460, `prize-${matchId}-${user2}`],
+        [user3, matchId, 276, `prize-${matchId}-${user3}`],
+      ]);
+      expect(prizeMutationCounts.get(`prize-${matchId}-${user1}`)).toBe(1);
+      expect(prizeMutationCounts.get(`prize-${matchId}-${user2}`)).toBe(1);
+      expect(prizeMutationCounts.get(`prize-${matchId}-${user3}`)).toBe(1);
+      expect(prizeMutationCounts.has(`prize-${matchId}-${user4}`)).toBe(false);
+      expect(seenRakeKeys.size).toBe(1);
+    });
+
+    it('post-payout persistence failure leaves the match retryable until a later retry succeeds', async () => {
       prisma.match.findUnique.mockResolvedValue(makeMatchRow());
 
       const result: MatchResult = [
@@ -602,20 +707,16 @@ describe('InMemoryMatchmakingService', () => {
         { userId: user2, position: 2, payoutCents: 0 as Money },
       ];
 
-      // First attempt: awardPrize succeeds for user1 (only winner gets prize)
-      // but then matchPlayer.updateMany fails during position persistence
       prisma.matchPlayer.updateMany
-        .mockResolvedValueOnce({ count: 1 }) // user1 position update
-        .mockRejectedValueOnce(new Error('DB connection lost')); // user2 position update fails
+        .mockResolvedValueOnce({ count: 1 })
+        .mockRejectedValueOnce(new Error('DB connection lost'));
 
       await expect(service.resolveMatch(matchId, result)).rejects.toThrow('DB connection lost');
-
-      // Verify awardPrize was called with idempotencyKey on first attempt
+      expect(prisma.match.update).not.toHaveBeenCalled();
       expect(walletService.awardPrize).toHaveBeenCalledWith(
         user1, matchId, 920, `prize-${matchId}-${user1}`,
       );
 
-      // Now simulate retry: match is still IN_PROGRESS (update to RESOLVED failed)
       vi.clearAllMocks();
       vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -634,20 +735,22 @@ describe('InMemoryMatchmakingService', () => {
         ...args.data,
       }));
 
-      // awardPrize returns existing transaction (idempotent) — no double-award
       const existingPrizeTx = { id: 'tx-prize-existing', type: 'PRIZE', amountCents: 920 };
       (walletService.awardPrize as ReturnType<typeof vi.fn>).mockResolvedValue(existingPrizeTx);
       (walletService.collectRake as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'tx-rake-existing' });
 
       const retryMatch = await service.resolveMatch(matchId, result);
       expect(retryMatch.status).toBe(MatchStatus.RESOLVED);
-
-      // awardPrize was called again with the SAME idempotencyKey — wallet returns existing
       expect(walletService.awardPrize).toHaveBeenCalledWith(
         user1, matchId, 920, `prize-${matchId}-${user1}`,
       );
-      // Only called once (user1 winner) — user2 gets 0 so no awardPrize call
       expect(walletService.awardPrize).toHaveBeenCalledTimes(1);
+      expect(prisma.match.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: matchId },
+          data: expect.objectContaining({ status: MatchStatus.RESOLVED }),
+        }),
+      );
     });
 
     it('rating update failure is logged and tolerated after payouts succeed', async () => {

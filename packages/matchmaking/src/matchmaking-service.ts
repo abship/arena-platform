@@ -224,8 +224,8 @@ export class InMemoryMatchmakingService implements MatchmakingService {
    * 4. Compute payouts and verify sum === prizePoolCents
    * 5. Collect rake (idempotent via matchId-scoped key)
    * 6. Award prizes in placement order (1st, 2nd, 3rd...)
-   * 7. Update match to RESOLVED with result
-   * 8. Update ELO ratings
+   * 7. Persist per-player results and ratings
+   * 8. Update match to RESOLVED last
    *
    * RETRY SAFETY: Each awardPrize call uses a deterministic idempotencyKey
    * (prize-${matchId}-${userId}), so retries after partial-payout failure
@@ -323,14 +323,10 @@ export class InMemoryMatchmakingService implements MatchmakingService {
       }
     }
 
-    // Update Match to RESOLVED
+    // Persist MatchPlayer rows before flipping the Match to RESOLVED.
+    // If persistence fails, retries remain safe because the match stays
+    // IN_PROGRESS and the wallet-layer prize/rake writes are idempotent.
     const resolvedAt = new Date();
-    await (this.prisma as unknown as PrismaAny).match.update({
-      where: { id: matchId as string },
-      data: { status: MatchStatus.RESOLVED, resolvedAt },
-    });
-
-    // Update MatchPlayer rows with final positions and payouts
     for (const placement of resolvedResult) {
       await (this.prisma as unknown as PrismaAny).matchPlayer.updateMany({
         where: {
@@ -353,6 +349,13 @@ export class InMemoryMatchmakingService implements MatchmakingService {
         error: ratingError instanceof Error ? ratingError.message : String(ratingError),
       });
     }
+
+    // Update Match to RESOLVED last so a persistence failure cannot strand
+    // the match in a resolved-but-incomplete state.
+    await (this.prisma as unknown as PrismaAny).match.update({
+      where: { id: matchId as string },
+      data: { status: MatchStatus.RESOLVED, resolvedAt },
+    });
 
     return toMatch(
       { ...matchRow, status: MatchStatus.RESOLVED, resolvedAt },

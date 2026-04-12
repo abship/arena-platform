@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Money } from '@arena/shared';
+import { ValidationError } from '@arena/shared';
 import { computeRake } from '../rake.js';
 
 describe('computeRake', () => {
@@ -59,5 +60,16 @@ describe('computeRake', () => {
     // total = 2002, rake = floor(100.1) = 100
     expect(rakeCents).toBe(100);
     expect(prizePoolCents).toBe(1902);
+  });
+
+  it('rejects non-integer entry fees', () => {
+    expect(() => computeRake(12.5 as Money, 2)).toThrow(ValidationError);
+  });
+
+  it('rejects invalid player counts', () => {
+    expect(() => computeRake(100 as Money, 1)).toThrow(ValidationError);
+    expect(() => computeRake(100 as Money, 0)).toThrow(ValidationError);
+    expect(() => computeRake(100 as Money, -1)).toThrow(ValidationError);
+    expect(() => computeRake(100 as Money, 2.5)).toThrow(ValidationError);
   });
 });

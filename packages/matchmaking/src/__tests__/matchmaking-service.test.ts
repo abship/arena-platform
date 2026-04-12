@@ -14,7 +14,7 @@ import type {
   MatchResult,
   WalletService,
 } from '@arena/shared';
-import { MatchStatus, ValidationError } from '@arena/shared';
+import { ConflictError, MatchStatus, ValidationError } from '@arena/shared';
 import { InMemoryMatchmakingService } from '../matchmaking-service.js';
 import { WinnerTakesAllCalculator, BattleRoyaleTopThreeCalculator } from '../payout-calculator.js';
 import type { PayoutCalculator } from '../payout-calculator.js';
@@ -189,11 +189,16 @@ describe('InMemoryMatchmakingService', () => {
 
   describe('createMatch', () => {
     it('happy path: 2 players → Match created, fees deducted, status IN_PROGRESS', async () => {
+      queue.add(user1, gameId, fee500);
+      queue.add(user2, gameId, fee500);
+
       const match = await service.createMatch(gameId, [user1, user2], fee500);
       expect(match.status).toBe(MatchStatus.IN_PROGRESS);
       expect(match.gameId).toBe(gameId);
       expect(walletService.deductEntryFee).toHaveBeenCalledTimes(2);
       expect(prisma.match.create).toHaveBeenCalledTimes(1);
+      expect(queue.hasPlayer(user1, gameId)).toBe(false);
+      expect(queue.hasPlayer(user2, gameId)).toBe(false);
     });
 
     it('4 players all succeed → 4 deductEntryFee calls, status IN_PROGRESS', async () => {
@@ -218,7 +223,34 @@ describe('InMemoryMatchmakingService', () => {
       // Refunds in reverse order
       expect((walletService.deposit as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toBe(user2);
       expect((walletService.deposit as ReturnType<typeof vi.fn>).mock.calls[1]![0]).toBe(user1);
+      const createdMatchId = prisma.match.create.mock.calls[0]![0].data.id as string;
+      expect((walletService.deposit as ReturnType<typeof vi.fn>).mock.calls[0]![3]).toBe(
+        `refund-${createdMatchId}-${user2}`,
+      );
+      expect((walletService.deposit as ReturnType<typeof vi.fn>).mock.calls[1]![3]).toBe(
+        `refund-${createdMatchId}-${user1}`,
+      );
       // Match cancelled
+      expect(prisma.match.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: MatchStatus.CANCELLED }),
+        }),
+      );
+    });
+
+    it('ConflictError during deduction is refunded, match is cancelled, and the same ConflictError is rethrown', async () => {
+      const conflict = new ConflictError('Serialization failure', { retryable: true });
+      const deductMock = vi.fn()
+        .mockResolvedValueOnce({ id: 'tx-1' })
+        .mockResolvedValueOnce({ id: 'tx-2' })
+        .mockRejectedValueOnce(conflict);
+      (walletService as { deductEntryFee: typeof deductMock }).deductEntryFee = deductMock;
+
+      await expect(
+        service.createMatch(gameId, [user1, user2, user3], fee500),
+      ).rejects.toBe(conflict);
+
+      expect(walletService.deposit).toHaveBeenCalledTimes(2);
       expect(prisma.match.update).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ status: MatchStatus.CANCELLED }),
@@ -271,6 +303,12 @@ describe('InMemoryMatchmakingService', () => {
         service.createMatch(gameId, [user1, user2], 0 as Money),
       ).rejects.toThrow(ValidationError);
     });
+
+    it('non-integer entryFeeCents → validation throw', async () => {
+      await expect(
+        service.createMatch(gameId, [user1, user2], 12.5 as Money),
+      ).rejects.toThrow(ValidationError);
+    });
   });
 
   /* ================================================================ */
@@ -290,24 +328,53 @@ describe('InMemoryMatchmakingService', () => {
 
       const match = await service.resolveMatch(matchId, result);
       expect(match.status).toBe(MatchStatus.RESOLVED);
+      expect(match.result).toEqual([
+        { userId: user1, position: 1, payoutCents: 920 },
+        { userId: user2, position: 2, payoutCents: 0 },
+      ]);
       expect(walletService.collectRake).toHaveBeenCalledWith(matchId, 80, `rake-${matchId}`);
       expect(walletService.awardPrize).toHaveBeenCalledWith(user1, matchId, 920);
       // 2nd place gets 0, so awardPrize not called for them
       expect(walletService.awardPrize).toHaveBeenCalledTimes(1);
     });
 
-    it('idempotent: second call on RESOLVED match is no-op', async () => {
+    it('idempotent: second call on RESOLVED match is no-op and returns persisted result', async () => {
       prisma.match.findUnique.mockResolvedValue(
-        makeMatchRow({ status: MatchStatus.RESOLVED, resolvedAt: new Date() }),
+        makeMatchRow({
+          status: MatchStatus.RESOLVED,
+          resolvedAt: new Date(),
+          players: [
+            {
+              id: 'mp-1',
+              matchId: 'match-uuid',
+              userId: 'user-1',
+              rating: 1216,
+              finalPosition: 1,
+              payoutCents: BigInt(920),
+            },
+            {
+              id: 'mp-2',
+              matchId: 'match-uuid',
+              userId: 'user-2',
+              rating: 1184,
+              finalPosition: 2,
+              payoutCents: BigInt(0),
+            },
+          ],
+        }),
       );
 
       const result: MatchResult = [
-        { userId: user1, position: 1, payoutCents: 0 as Money },
-        { userId: user2, position: 2, payoutCents: 0 as Money },
+        { userId: user2, position: 1, payoutCents: 999 as Money },
+        { userId: user1, position: 2, payoutCents: 111 as Money },
       ];
 
       const match = await service.resolveMatch(matchId, result);
       expect(match.status).toBe(MatchStatus.RESOLVED);
+      expect(match.result).toEqual([
+        { userId: user1, position: 1, payoutCents: 920 },
+        { userId: user2, position: 2, payoutCents: 0 },
+      ]);
       // No additional wallet/DB writes
       expect(walletService.collectRake).not.toHaveBeenCalled();
       expect(walletService.awardPrize).not.toHaveBeenCalled();
@@ -398,6 +465,158 @@ describe('InMemoryMatchmakingService', () => {
       ];
       await expect(service.resolveMatch(matchId, result)).rejects.toThrow(ValidationError);
     });
+
+    it('result containing a player not in the match → throws before money moves', async () => {
+      prisma.match.findUnique.mockResolvedValue(makeMatchRow());
+      const result: MatchResult = [
+        { userId: user1, position: 1, payoutCents: 0 as Money },
+        { userId: 'attacker' as UserId, position: 2, payoutCents: 0 as Money },
+      ];
+
+      await expect(service.resolveMatch(matchId, result)).rejects.toThrow(ValidationError);
+      expect(walletService.collectRake).not.toHaveBeenCalled();
+      expect(walletService.awardPrize).not.toHaveBeenCalled();
+    });
+
+    it('duplicate players in result → throws before money moves', async () => {
+      prisma.match.findUnique.mockResolvedValue(
+        makeMatchRow({
+          poolCents: BigInt(1380),
+          rakeCents: BigInt(120),
+          players: [
+            { id: 'mp-1', matchId: 'match-uuid', userId: 'user-1', rating: 1200 },
+            { id: 'mp-2', matchId: 'match-uuid', userId: 'user-2', rating: 1200 },
+            { id: 'mp-3', matchId: 'match-uuid', userId: 'user-3', rating: 1200 },
+          ],
+        }),
+      );
+
+      const result: MatchResult = [
+        { userId: user1, position: 1, payoutCents: 0 as Money },
+        { userId: user2, position: 2, payoutCents: 0 as Money },
+        { userId: user1, position: 3, payoutCents: 0 as Money },
+      ];
+
+      await expect(service.resolveMatch(matchId, result)).rejects.toThrow(ValidationError);
+      expect(walletService.collectRake).not.toHaveBeenCalled();
+      expect(walletService.awardPrize).not.toHaveBeenCalled();
+    });
+
+    it('zero rake skips collectRake but still awards prizes', async () => {
+      prisma.match.findUnique.mockResolvedValue(
+        makeMatchRow({
+          entryFeeCents: BigInt(1),
+          poolCents: BigInt(2),
+          rakeCents: BigInt(0),
+        }),
+      );
+
+      const result: MatchResult = [
+        { userId: user1, position: 1, payoutCents: 0 as Money },
+        { userId: user2, position: 2, payoutCents: 0 as Money },
+      ];
+
+      const match = await service.resolveMatch(matchId, result);
+      expect(match.result).toEqual([
+        { userId: user1, position: 1, payoutCents: 2 },
+        { userId: user2, position: 2, payoutCents: 0 },
+      ]);
+      expect(walletService.collectRake).not.toHaveBeenCalled();
+      expect(walletService.awardPrize).toHaveBeenCalledWith(user1, matchId, 2);
+    });
+
+    it('invalid payout calculator output → throws before money moves', async () => {
+      const brokenCalc: PayoutCalculator = {
+        calculate: () => [
+          { userId: 'outsider' as UserId, payoutCents: 920 as Money },
+        ],
+      };
+      calculators.set(gameId, brokenCalc);
+      prisma.match.findUnique.mockResolvedValue(makeMatchRow());
+
+      const result: MatchResult = [
+        { userId: user1, position: 1, payoutCents: 0 as Money },
+        { userId: user2, position: 2, payoutCents: 0 as Money },
+      ];
+
+      await expect(service.resolveMatch(matchId, result)).rejects.toThrow(ValidationError);
+      expect(walletService.collectRake).not.toHaveBeenCalled();
+      expect(walletService.awardPrize).not.toHaveBeenCalled();
+    });
+
+    it('uses prior resolved ratings and updates the current match rows, not the newest resolved row by accident', async () => {
+      prisma.match.findUnique.mockResolvedValue(makeMatchRow());
+      prisma.matchPlayer.findFirst.mockImplementation(
+        async (args: { where: { userId: string; match: { id?: { not?: string } } } }) => {
+          if (!args.where.match.id?.not) {
+            return { rating: 1200 };
+          }
+
+          return args.where.userId === 'user-1' ? { rating: 1400 } : { rating: 1200 };
+        },
+      );
+
+      const result: MatchResult = [
+        { userId: user1, position: 1, payoutCents: 0 as Money },
+        { userId: user2, position: 2, payoutCents: 0 as Money },
+      ];
+
+      await service.resolveMatch(matchId, result);
+
+      expect(prisma.matchPlayer.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            userId: 'user-1',
+            match: expect.objectContaining({
+              status: MatchStatus.RESOLVED,
+              id: { not: matchId },
+            }),
+          }),
+        }),
+      );
+
+      const ratingUpdates = prisma.matchPlayer.updateMany.mock.calls.slice(-2);
+      expect(ratingUpdates).toEqual([
+        [
+          {
+            where: { matchId, userId: 'user-1' },
+            data: { rating: 1408 },
+          },
+        ],
+        [
+          {
+            where: { matchId, userId: 'user-2' },
+            data: { rating: 1192 },
+          },
+        ],
+      ]);
+    });
+
+    it('rating update failure is logged and tolerated after payouts succeed', async () => {
+      prisma.match.findUnique.mockResolvedValue(makeMatchRow());
+      prisma.matchPlayer.updateMany
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 1 })
+        .mockRejectedValueOnce(new Error('ratings failed'));
+
+      const result: MatchResult = [
+        { userId: user1, position: 1, payoutCents: 0 as Money },
+        { userId: user2, position: 2, payoutCents: 0 as Money },
+      ];
+
+      const match = await service.resolveMatch(matchId, result);
+      expect(match.status).toBe(MatchStatus.RESOLVED);
+      expect(walletService.collectRake).toHaveBeenCalledWith(matchId, 80, `rake-${matchId}`);
+      expect(walletService.awardPrize).toHaveBeenCalledWith(user1, matchId, 920);
+      expect(console.error).toHaveBeenCalledWith(
+        'Failed to update matchmaking ratings after match resolution',
+        expect.objectContaining({
+          matchId,
+          gameId,
+          error: 'ratings failed',
+        }),
+      );
+    });
   });
 
   /* ================================================================ */
@@ -416,6 +635,28 @@ describe('InMemoryMatchmakingService', () => {
       prisma.matchPlayer.findFirst.mockResolvedValue({ rating: 1350 });
       const rating = await service.getRating(user1, gameId);
       expect(rating.elo).toBe(1350);
+    });
+
+    it('queries only resolved matches so newer in-progress rows do not reset the visible rating', async () => {
+      prisma.matchPlayer.findFirst.mockImplementation(
+        async (args: { where: { match?: { status?: MatchStatus } } }) => {
+          if (args.where.match?.status === MatchStatus.RESOLVED) {
+            return { rating: 1375 };
+          }
+
+          return { rating: 1200 };
+        },
+      );
+
+      const rating = await service.getRating(user1, gameId);
+      expect(rating).toEqual({ userId: user1, gameId, elo: 1375 });
+      expect(prisma.matchPlayer.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            match: expect.objectContaining({ status: MatchStatus.RESOLVED }),
+          }),
+        }),
+      );
     });
   });
 });

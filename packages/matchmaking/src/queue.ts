@@ -28,6 +28,12 @@ export class MatchQueue {
     return `${gameId}:${entryFeeCents}`;
   }
 
+  private pruneBucketIfEmpty(key: string, bucket: UserId[]): void {
+    if (bucket.length === 0) {
+      this.buckets.delete(key);
+    }
+  }
+
   /**
    * Add a player to a queue bucket.
    * @throws ValidationError if the player is already in this exact bucket
@@ -64,6 +70,7 @@ export class MatchQueue {
         const idx = bucket.indexOf(userId);
         if (idx !== -1) {
           bucket.splice(idx, 1);
+          this.pruneBucketIfEmpty(key, bucket);
         }
       }
       return;
@@ -76,6 +83,7 @@ export class MatchQueue {
         const idx = bucket.indexOf(userId);
         if (idx !== -1) {
           bucket.splice(idx, 1);
+          this.pruneBucketIfEmpty(key, bucket);
         }
       }
     }

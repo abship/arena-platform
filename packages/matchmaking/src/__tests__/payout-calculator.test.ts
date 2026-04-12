@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Money, MatchResult, UserId } from '@arena/shared';
+import { ValidationError } from '@arena/shared';
 import {
   WinnerTakesAllCalculator,
   BattleRoyaleTopThreeCalculator,
@@ -38,6 +39,11 @@ describe('WinnerTakesAllCalculator', () => {
       expect(p.payoutCents).toBe(0);
     }
   });
+
+  it('fewer than 2 players → throws ValidationError', () => {
+    const result = makeResult(['solo', 1]);
+    expect(() => calc.calculate(500 as Money, result)).toThrow(ValidationError);
+  });
 });
 
 describe('BattleRoyaleTopThreeCalculator', () => {
@@ -68,6 +74,17 @@ describe('BattleRoyaleTopThreeCalculator', () => {
     expect(payouts.find((p) => p.userId === ('u3' as UserId))!.payoutCents).toBe(150);
   });
 
+  it('small-pool rounding stays exact for pools 1, 2, 3, and 5', () => {
+    const result = makeResult(
+      ['u1', 1], ['u2', 2], ['u3', 3], ['u4', 4], ['u5', 5],
+    );
+
+    expect(calc.calculate(1 as Money, result).map((p) => p.payoutCents)).toEqual([1, 0, 0, 0, 0]);
+    expect(calc.calculate(2 as Money, result).map((p) => p.payoutCents)).toEqual([2, 0, 0, 0, 0]);
+    expect(calc.calculate(3 as Money, result).map((p) => p.payoutCents)).toEqual([3, 0, 0, 0, 0]);
+    expect(calc.calculate(5 as Money, result).map((p) => p.payoutCents)).toEqual([4, 1, 0, 0, 0]);
+  });
+
   it('invariant: across random pool sizes 1-100000, sum always equals pool', () => {
     for (let i = 0; i < 100; i++) {
       const pool = Math.floor(Math.random() * 100000) + 1;
@@ -78,6 +95,11 @@ describe('BattleRoyaleTopThreeCalculator', () => {
       const sum = payouts.reduce((s, p) => s + (p.payoutCents as number), 0);
       expect(sum).toBe(pool);
     }
+  });
+
+  it('fewer than 3 players → throws ValidationError', () => {
+    const result = makeResult(['u1', 1], ['u2', 2]);
+    expect(() => calc.calculate(1000 as Money, result)).toThrow(ValidationError);
   });
 });
 
@@ -96,5 +118,10 @@ describe('CoinflipCalculator', () => {
     const payouts = calc.calculate(1234 as Money, result);
     const sum = payouts.reduce((s, p) => s + (p.payoutCents as number), 0);
     expect(sum).toBe(1234);
+  });
+
+  it('not-exactly-2 players → throws ValidationError', () => {
+    const result = makeResult(['a', 1], ['b', 2], ['c', 3]);
+    expect(() => calc.calculate(1234 as Money, result)).toThrow(ValidationError);
   });
 });

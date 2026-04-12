@@ -78,13 +78,11 @@ export class InMemoryMatchmakingService implements MatchmakingService {
     gameId: GameId,
     entryFeeCents: Money,
   ): Promise<void> {
-    if (!Number.isFinite(entryFeeCents as number) || (entryFeeCents as number) <= 0) {
-      throw new ValidationError('entryFeeCents must be a positive integer', {
-        userId,
-        gameId,
-        entryFeeCents,
-      });
-    }
+    validatePositiveIntegerMoney(entryFeeCents, 'entryFeeCents', {
+      userId,
+      gameId,
+      entryFeeCents,
+    });
     this.queue.add(userId, gameId, entryFeeCents);
   }
 
@@ -118,12 +116,10 @@ export class InMemoryMatchmakingService implements MatchmakingService {
         playerCount: playerIds.length,
       });
     }
-    if (!Number.isFinite(entryFeeCents as number) || (entryFeeCents as number) <= 0) {
-      throw new ValidationError('entryFeeCents must be a positive integer', {
-        gameId,
-        entryFeeCents,
-      });
-    }
+    validatePositiveIntegerMoney(entryFeeCents, 'entryFeeCents', {
+      gameId,
+      entryFeeCents,
+    });
     const uniqueIds = new Set(playerIds);
     if (uniqueIds.size !== playerIds.length) {
       throw new ValidationError('Duplicate player IDs in match', {
@@ -246,7 +242,10 @@ export class InMemoryMatchmakingService implements MatchmakingService {
 
     // Idempotent: already resolved → return unchanged
     if (matchRow.status === MatchStatus.RESOLVED) {
-      return toMatch(matchRow, result);
+      return toMatch(
+        matchRow,
+        extractPersistedResult(matchId, matchRow.players as MatchPlayerRow[], true),
+      );
     }
 
     if (matchRow.status === MatchStatus.CANCELLED) {
@@ -265,37 +264,11 @@ export class InMemoryMatchmakingService implements MatchmakingService {
       throw new ValidationError('Match result cannot be empty', { matchId });
     }
 
-    // Validate positions are contiguous starting at 1
-    const positions = result.map((p) => p.position).sort((a, b) => a - b);
-    for (let i = 0; i < positions.length; i++) {
-      if (positions[i] !== i + 1) {
-        throw new ValidationError(
-          'Placements must have contiguous positions starting at 1',
-          { matchId, positions },
-        );
-      }
-    }
-
-    // Validate players match the match's player list
-    const matchPlayerIds = new Set(
-      (matchRow.players as Array<{ userId: string }>).map((mp) => mp.userId),
+    const matchPlayerIds = validateResultAgainstPlayers(
+      matchId,
+      result,
+      matchRow.players as MatchPlayerRow[],
     );
-    const resultPlayerIds = new Set(result.map((p) => p.userId as string));
-    if (matchPlayerIds.size !== resultPlayerIds.size) {
-      throw new ValidationError('Result players do not match match players', {
-        matchId,
-        expected: [...matchPlayerIds],
-        got: [...resultPlayerIds],
-      });
-    }
-    for (const id of resultPlayerIds) {
-      if (!matchPlayerIds.has(id)) {
-        throw new ValidationError('Result contains unknown player', {
-          matchId,
-          unknownUserId: id,
-        });
-      }
-    }
 
     // Look up payout calculator
     const gameId = matchRow.gameId as GameId;
@@ -312,9 +285,14 @@ export class InMemoryMatchmakingService implements MatchmakingService {
 
     // Compute payouts
     const payouts = calculator.calculate(prizePoolCents, result);
+    validateCalculatedPayouts(matchId, payouts, matchPlayerIds);
+    const resolvedResult = buildResolvedResult(result, payouts);
 
     // Invariant check: sum of payouts must equal prizePoolCents
-    const payoutSum = payouts.reduce((sum, p) => sum + (p.payoutCents as number), 0);
+    const payoutSum = resolvedResult.reduce(
+      (sum, placement) => sum + (placement.payoutCents as number),
+      0,
+    );
     if (payoutSum !== (prizePoolCents as number)) {
       throw new ValidationError(
         'Payout sum does not equal prize pool — refusing to distribute money',
@@ -328,21 +306,17 @@ export class InMemoryMatchmakingService implements MatchmakingService {
     }
 
     // Collect rake (idempotent via key)
-    await this.walletService.collectRake(matchId, rakeCents, `rake-${matchId}`);
+    if ((rakeCents as number) > 0) {
+      await this.walletService.collectRake(matchId, rakeCents, `rake-${matchId}`);
+    }
 
     // Award prizes in placement order (1st, 2nd, 3rd...)
-    const sortedPayouts = [...payouts].sort((a, b) => {
-      const posA = result.find((r) => r.userId === a.userId)!.position;
-      const posB = result.find((r) => r.userId === b.userId)!.position;
-      return posA - posB;
-    });
-
-    for (const payout of sortedPayouts) {
-      if ((payout.payoutCents as number) > 0) {
+    for (const placement of resolvedResult) {
+      if ((placement.payoutCents as number) > 0) {
         await this.walletService.awardPrize(
-          payout.userId,
+          placement.userId,
           matchId,
-          payout.payoutCents,
+          placement.payoutCents,
         );
       }
     }
@@ -355,8 +329,7 @@ export class InMemoryMatchmakingService implements MatchmakingService {
     });
 
     // Update MatchPlayer rows with final positions and payouts
-    for (const placement of result) {
-      const playerPayout = payouts.find((p) => p.userId === placement.userId);
+    for (const placement of resolvedResult) {
       await (this.prisma as unknown as PrismaAny).matchPlayer.updateMany({
         where: {
           matchId: matchId as string,
@@ -364,17 +337,24 @@ export class InMemoryMatchmakingService implements MatchmakingService {
         },
         data: {
           finalPosition: placement.position,
-          payoutCents: BigInt((playerPayout?.payoutCents ?? 0) as number),
+          payoutCents: BigInt(placement.payoutCents as number),
         },
       });
     }
 
-    // Update ELO ratings
-    await this.updateRatings(gameId, result);
+    try {
+      await this.updateRatings(matchId, gameId, resolvedResult);
+    } catch (ratingError: unknown) {
+      console.error('Failed to update matchmaking ratings after match resolution', {
+        matchId,
+        gameId,
+        error: ratingError instanceof Error ? ratingError.message : String(ratingError),
+      });
+    }
 
     return toMatch(
       { ...matchRow, status: MatchStatus.RESOLVED, resolvedAt },
-      result,
+      resolvedResult,
     );
   }
 
@@ -384,11 +364,11 @@ export class InMemoryMatchmakingService implements MatchmakingService {
    */
   async getRating(userId: UserId, gameId: GameId): Promise<PlayerRating> {
     // We track ratings via MatchPlayer rows. For a clean getRating,
-    // look at the most recent MatchPlayer for this user+game.
+    // look at the most recent resolved MatchPlayer for this user+game.
     const recent = await (this.prisma as unknown as PrismaAny).matchPlayer.findFirst({
       where: {
         userId: userId as string,
-        match: { gameId: gameId as string },
+        match: { gameId: gameId as string, status: MatchStatus.RESOLVED },
       },
       orderBy: { joinedAt: 'desc' },
     });
@@ -404,6 +384,7 @@ export class InMemoryMatchmakingService implements MatchmakingService {
    * Fetch current ratings, compute ELO updates, and persist new ratings.
    */
   private async updateRatings(
+    matchId: MatchId,
     gameId: GameId,
     result: MatchResult,
   ): Promise<void> {
@@ -419,7 +400,11 @@ export class InMemoryMatchmakingService implements MatchmakingService {
       const recent = await (this.prisma as unknown as PrismaAny).matchPlayer.findFirst({
         where: {
           userId: placement.userId as string,
-          match: { gameId: gameId as string, status: MatchStatus.RESOLVED },
+          match: {
+            gameId: gameId as string,
+            status: MatchStatus.RESOLVED,
+            id: { not: matchId as string },
+          },
         },
         orderBy: { joinedAt: 'desc' },
       });
@@ -429,27 +414,20 @@ export class InMemoryMatchmakingService implements MatchmakingService {
 
     const newRatings = updateElo(playerRatings, placements);
 
-    // The MatchPlayer rows for the current match were already created in createMatch.
-    // Update them with the new post-match rating.
-    // Note: we look up the matchPlayer for the current match (the one just resolved)
-    // to update its rating to the post-match value.
-    // We already wrote finalPosition above, now write updated rating.
     for (let i = 0; i < playerIds.length; i++) {
-      // Find the MatchPlayer for this player in the most recent resolved match
-      // Since we just resolved it, we can search for matches with this gameId that are RESOLVED
-      const matchPlayers = await (this.prisma as unknown as PrismaAny).matchPlayer.findMany({
+      const updateResult = await (this.prisma as unknown as PrismaAny).matchPlayer.updateMany({
         where: {
+          matchId: matchId as string,
           userId: playerIds[i] as string,
-          match: { gameId: gameId as string, status: MatchStatus.RESOLVED },
         },
-        orderBy: { joinedAt: 'desc' },
-        take: 1,
+        data: { rating: newRatings[i] },
       });
 
-      if (matchPlayers.length > 0) {
-        await (this.prisma as unknown as PrismaAny).matchPlayer.update({
-          where: { id: matchPlayers[0].id },
-          data: { rating: newRatings[i] },
+      if (updateResult.count !== 1) {
+        throw new InvalidStateError('Expected exactly one MatchPlayer row when updating rating', {
+          matchId,
+          userId: playerIds[i],
+          updatedRows: updateResult.count,
         });
       }
     }
@@ -478,6 +456,158 @@ function toMatch(
   };
 }
 
+function validatePositiveIntegerMoney(
+  amountCents: Money,
+  fieldName: string,
+  context: Record<string, unknown>,
+): void {
+  if (!Number.isFinite(amountCents as number) || !Number.isInteger(amountCents as number)) {
+    throw new ValidationError(`${fieldName} must be an integer of cents`, context);
+  }
+  if ((amountCents as number) <= 0) {
+    throw new ValidationError(`${fieldName} must be positive`, context);
+  }
+}
+
+function validateResultAgainstPlayers(
+  matchId: MatchId,
+  result: MatchResult,
+  players: readonly MatchPlayerRow[],
+): Set<string> {
+  const matchPlayerIds = new Set(players.map((player) => player.userId));
+  if (result.length !== players.length) {
+    throw new ValidationError('Result length must match the number of match players', {
+      matchId,
+      expectedPlayerCount: players.length,
+      resultCount: result.length,
+    });
+  }
+
+  const resultPlayerIds = result.map((placement) => placement.userId as string);
+  const uniqueResultPlayerIds = new Set(resultPlayerIds);
+  if (uniqueResultPlayerIds.size !== result.length) {
+    throw new ValidationError('Result contains duplicate players', {
+      matchId,
+      resultPlayerIds,
+    });
+  }
+
+  const positions = result.map((placement) => placement.position).sort((a, b) => a - b);
+  for (let i = 0; i < positions.length; i++) {
+    if (positions[i] !== i + 1) {
+      throw new ValidationError(
+        'Placements must have contiguous positions starting at 1',
+        { matchId, positions },
+      );
+    }
+  }
+
+  for (const userId of uniqueResultPlayerIds) {
+    if (!matchPlayerIds.has(userId)) {
+      throw new ValidationError('Result contains unknown player', {
+        matchId,
+        unknownUserId: userId,
+      });
+    }
+  }
+
+  return matchPlayerIds;
+}
+
+function validateCalculatedPayouts(
+  matchId: MatchId,
+  payouts: readonly { userId: UserId; payoutCents: Money }[],
+  matchPlayerIds: ReadonlySet<string>,
+): void {
+  const seenUserIds = new Set<string>();
+
+  for (const payout of payouts) {
+    const payoutUserId = payout.userId as string;
+    const payoutAmount = payout.payoutCents as number;
+
+    if (!matchPlayerIds.has(payoutUserId)) {
+      throw new ValidationError('Payout calculator returned an unknown player', {
+        matchId,
+        userId: payoutUserId,
+      });
+    }
+
+    if (seenUserIds.has(payoutUserId)) {
+      throw new ValidationError('Payout calculator returned duplicate payout entries', {
+        matchId,
+        userId: payoutUserId,
+      });
+    }
+
+    if (!Number.isFinite(payoutAmount) || !Number.isInteger(payoutAmount) || payoutAmount < 0) {
+      throw new ValidationError('Payout calculator returned an invalid payout amount', {
+        matchId,
+        userId: payoutUserId,
+        payoutCents: payout.payoutCents,
+      });
+    }
+
+    seenUserIds.add(payoutUserId);
+  }
+}
+
+function buildResolvedResult(
+  result: MatchResult,
+  payouts: readonly { userId: UserId; payoutCents: Money }[],
+): MatchResult {
+  const payoutByUserId = new Map<string, Money>(
+    payouts.map((payout) => [payout.userId as string, payout.payoutCents]),
+  );
+
+  return [...result]
+    .sort((a, b) => a.position - b.position)
+    .map((placement) => ({
+      ...placement,
+      payoutCents: payoutByUserId.get(placement.userId as string) ?? (0 as Money),
+    }));
+}
+
+function extractPersistedResult(
+  matchId: MatchId,
+  players: readonly MatchPlayerRow[],
+  requireComplete: boolean,
+): MatchResult | null {
+  if (players.length === 0) {
+    if (requireComplete) {
+      throw new InvalidStateError('Resolved match has no persisted player results', { matchId });
+    }
+    return null;
+  }
+
+  const result = players
+    .map((player) => {
+      if (player.finalPosition === null || player.finalPosition === undefined) {
+        return null;
+      }
+      if (player.payoutCents === null || player.payoutCents === undefined) {
+        return null;
+      }
+
+      return {
+        userId: player.userId as UserId,
+        position: player.finalPosition,
+        payoutCents: Number(player.payoutCents) as Money,
+      };
+    })
+    .filter((placement): placement is MatchResult[number] => placement !== null)
+    .sort((a, b) => a.position - b.position);
+
+  if (requireComplete && result.length !== players.length) {
+    throw new InvalidStateError('Resolved match is missing persisted placements', {
+      matchId,
+      expectedPlayerCount: players.length,
+      persistedPlacementCount: result.length,
+    });
+  }
+
+  return result.length > 0 ? result : null;
+}
+
 /**
  * Escape-hatch type for Prisma client method access.
  * PrismaClient generic types vary across generated clients;
@@ -485,3 +615,13 @@ function toMatch(
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type PrismaAny = Record<string, any>;
+
+interface MatchPlayerRow {
+  readonly id?: string;
+  readonly matchId?: string;
+  readonly userId: string;
+  readonly rating?: number;
+  readonly finalPosition?: number | null;
+  readonly payoutCents?: bigint | null;
+  readonly joinedAt?: Date;
+}

@@ -10,6 +10,7 @@
 
 import type { Money, MatchResult, GameId } from '@arena/shared';
 import type { UserId } from '@arena/shared';
+import { ValidationError } from '@arena/shared';
 
 /** Calculates prize distribution for a resolved match. */
 export interface PayoutCalculator {
@@ -34,6 +35,12 @@ export class WinnerTakesAllCalculator implements PayoutCalculator {
     prizePoolCents: Money,
     result: MatchResult,
   ): readonly { userId: UserId; payoutCents: Money }[] {
+    if (result.length < 2) {
+      throw new ValidationError('WinnerTakesAll requires at least 2 placements', {
+        playerCount: result.length,
+      });
+    }
+
     // Sort by position ascending to find 1st place
     const sorted = [...result].sort((a, b) => a.position - b.position);
 
@@ -55,6 +62,13 @@ export class BattleRoyaleTopThreeCalculator implements PayoutCalculator {
     prizePoolCents: Money,
     result: MatchResult,
   ): readonly { userId: UserId; payoutCents: Money }[] {
+    if (result.length < 3) {
+      throw new ValidationError(
+        'BattleRoyaleTopThree requires at least 3 placements',
+        { playerCount: result.length },
+      );
+    }
+
     const pool = prizePoolCents as number;
     const sorted = [...result].sort((a, b) => a.position - b.position);
 
@@ -89,6 +103,12 @@ export class CoinflipCalculator implements PayoutCalculator {
     prizePoolCents: Money,
     result: MatchResult,
   ): readonly { userId: UserId; payoutCents: Money }[] {
+    if (result.length !== 2) {
+      throw new ValidationError('Coinflip requires exactly 2 placements', {
+        playerCount: result.length,
+      });
+    }
+
     const sorted = [...result].sort((a, b) => a.position - b.position);
 
     return sorted.map((placement, idx) => ({

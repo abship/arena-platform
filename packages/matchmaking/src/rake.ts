@@ -12,6 +12,7 @@
  */
 
 import type { Money } from '@arena/shared';
+import { ValidationError } from '@arena/shared';
 
 /**
  * Compute the rake and prize pool for a match.
@@ -23,6 +24,22 @@ export function computeRake(
   entryFeeCents: Money,
   numPlayers: number,
 ): { rakeCents: Money; prizePoolCents: Money } {
+  if (
+    !Number.isFinite(entryFeeCents as number) ||
+    !Number.isInteger(entryFeeCents as number) ||
+    (entryFeeCents as number) <= 0
+  ) {
+    throw new ValidationError('entryFeeCents must be a positive integer', {
+      entryFeeCents,
+    });
+  }
+
+  if (!Number.isFinite(numPlayers) || !Number.isInteger(numPlayers) || numPlayers < 2) {
+    throw new ValidationError('numPlayers must be an integer >= 2', {
+      numPlayers,
+    });
+  }
+
   const totalPool = (entryFeeCents as number) * numPlayers;
 
   let rakePercent: number;

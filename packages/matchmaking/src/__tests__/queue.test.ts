@@ -85,4 +85,13 @@ describe('MatchQueue', () => {
     q.remove(user1, game1);
     expect(q.hasPlayer(user1, game1)).toBe(false);
   });
+
+  it('removing the last player prunes the empty bucket', () => {
+    const q = new MatchQueue();
+    q.add(user1, game1, fee100);
+    q.remove(user1, game1, fee100);
+
+    const buckets = (q as unknown as { buckets: Map<string, readonly UserId[]> }).buckets;
+    expect(buckets.size).toBe(0);
+  });
 });

@@ -76,25 +76,25 @@ None currently.
 
 Sign up in the moment the agent needs the API key during integration. No point signing up early.
 
-- **MaxMind GeoLite2** — sign up when building MaxMindProvider. Interface is ready in packages/geolocation/; swap-in point is geo-service-factory.ts (single switch-case branch). Signup just unlocks the real provider implementation
-- **Sentry** — sign up when deploying beta and wanting real error monitoring
-- **PostHog** — sign up when building the website and wanting analytics
-- **Resend** — sign up when building real transactional email (verification, match notifications)
-- **Cloudflare** — sign up when moving DNS for arenagaming.gg before beta deploy
+- **MaxMind GeoLite2** — sign up when building MaxMindProvider. Interface is ready in packages/geolocation/; swap-in point is geo-service-factory.ts (single switch-case branch). Signup just unlocks the real provider implementation. See Deferred Integration Points → MaxMind GeoLite2 for swap steps.
+- **Sentry** — sign up when deploying beta and wanting real error monitoring. See Deferred Integration Points → Sentry for swap steps.
+- **PostHog** — sign up when building the website and wanting analytics. See Deferred Integration Points → PostHog for swap steps.
+- **Resend** — sign up when building real transactional email (verification, match notifications). See Deferred Integration Points → Resend for swap steps.
+- **Cloudflare** — sign up when moving DNS for arenagaming.gg before beta deploy. See Deferred Integration Points → Cloudflare for swap steps.
 - **Fly.io** — sign up at production deploy time (beta stays on Railway)
-- **Upstash Redis** — sign up when in-memory queues need to survive server restarts
-- **Coinbase personal + Commerce** — sign up at payment integration time
-- **NOWPayments** — sign up at payment integration time
+- **Upstash Redis** — sign up when in-memory queues need to survive server restarts. See Deferred Integration Points → Upstash Redis for swap steps.
+- **Coinbase personal + Commerce** — sign up at payment integration time. See Deferred Integration Points → Coinbase Commerce for swap steps.
+- **NOWPayments** — sign up at payment integration time. See Deferred Integration Points → NOWPayments for swap steps.
 - **Bitwarden or 1Password** — set up a password manager immediately, before account count grows
 
 ### Accounts Deferred Until Post-Beta (Need Working Product to Apply)
 
-- **BitPay merchant** — after beta works with fake money, needs business bank account
-- **Paysafe, Nuvei, Finix** — after beta, card processors want to see live product
-- **Jumio** — after beta, KYC vendor wants integration context
-- **GeoComply** — separate package (fundamentally different shape: signed device assertions with client SDK, not IP lookup), required for licensed US states (NJ/PA/MI), post-beta only. Enterprise sales after gaming license application started
+- **BitPay merchant** — after beta works with fake money, needs business bank account. See Deferred Integration Points → BitPay for swap steps.
+- **Paysafe, Nuvei, Finix** — after beta, card processors want to see live product. See Deferred Integration Points → Paysafe and Nuvei for swap steps.
+- **Jumio** — after beta, KYC vendor wants integration context. See Deferred Integration Points → Jumio for swap steps.
+- **GeoComply** — separate package (fundamentally different shape: signed device assertions with client SDK, not IP lookup), required for licensed US states (NJ/PA/MI), post-beta only. Enterprise sales after gaming license application started. See Deferred Integration Points → GeoComply for swap steps.
 - **Xpoint** — after gaming license application started, enterprise sales
-- **Elliptic** — when processing real crypto volume
+- **Elliptic** — when processing real crypto volume. See Deferred Integration Points → Elliptic for swap steps.
 - **Bench, Pilot, or Kruze CPA** — when real expenses justify bookkeeping
 - **Ifrah Law, Walters Law Group intro calls** — after beta deployed, when there's a product to describe
 - **Business bank account (Relay / Grasshopper / Chase)** — at launch prep before applying to payment processors
@@ -145,6 +145,133 @@ Sign up in the moment the agent needs the API key during integration. No point s
 ### CI / Testing
 - **No integration tests.** CI runs typecheck, build, and mocked unit tests. No end-to-end test of deposit → match → payout flow against a real database.
 - **Node 20 action deprecated June 2026.** .github/workflows/ci.yml uses actions/checkout@v4 and actions/setup-node@v4 on node-version: 20. GitHub will force Node 24 by June 2, 2026. Bump to 24 before then.
+
+## Deferred Integration Points
+
+When each deferred service is ready to integrate, here is exactly what needs to change and where. This is a living reference — update when a service lands or when the integration path changes.
+
+**MaxMind GeoLite2 (geolocation real provider)**
+- Signup: maxmind.com/en/geolite2/signup, free, instant
+- Download: GeoLite2-City.mmdb, place OUTSIDE repo (e.g. `~/arena-platform-data/GeoLite2-City.mmdb`), never commit
+- Env vars: `MAXMIND_ACCOUNT_ID`, `MAXMIND_LICENSE_KEY`, `MAXMIND_DB_PATH`, `GEO_PROVIDER=maxmind`
+- Dep: add `@maxmind/geoip2-node` to `packages/geolocation/package.json`
+- New file: `packages/geolocation/src/maxmind-provider.ts` implementing `GeoService` from `packages/shared/src/interfaces/geo-service.ts`. Delegate `getRules`/`checkJurisdiction` to the injected `RulesSource` (same as FakeGeoProvider). Only `getLocation` changes — use the MaxMind reader for IP-based lookups, ignore gpsCoords in v1 or fuse later.
+- Factory branch: add `case 'maxmind'` in `packages/geolocation/src/geo-service-factory.ts` error-listing all supported providers
+- Export from barrel: `packages/geolocation/src/index.ts`
+- Tests: mock the MaxMind reader; verify interface conformance and rule delegation
+- README update: move MaxMind entry from "Accounts Deferred" to "Accounts Active Now"
+
+**GeoComply (licensed-state location verification — separate package, not geolocation)**
+- Required for Tier 3/4 games in licensed US states (NJ, PA, MI). Post-beta only. Enterprise sales, contract required.
+- Fundamentally different shape from geolocation: signed device assertions via client SDK, NOT IP lookup. Do NOT cram into `packages/geolocation/`.
+- New interface: `packages/shared/src/interfaces/location-verification-service.ts` with shape like `verifyLocationAssertion(signedToken: string): Promise<VerifiedLocation>`
+- New package: `packages/location-verification/` with `FakeLocationVerifier` + `GeoComplyProvider` + factory (same fake-then-swap pattern)
+- Integration: in servers/api match-start handler, after geolocation check, if game tier requires licensed state, additionally require a valid GeoComply assertion from the client
+- Client SDK: add to apps/web when integrated; clients generate signed tokens, send them on match-join
+
+**BitPay (primary multi-chain crypto)**
+- Signup: bitpay.com/business, $75 application fee, 5-7 day review. Requires business bank account first.
+- Env vars: `BITPAY_API_KEY`, `PAYMENT_PROVIDER=bitpay` (or multi-provider map if supporting multiple simultaneously)
+- New file: `packages/payments/src/bitpay-provider.ts` implementing `PaymentProvider` from `packages/shared/src/interfaces/payment-provider.ts`
+- Factory branch: add `case 'bitpay'` in `packages/payments/src/payment-provider-factory.ts`
+- Webhooks: add handler in servers/api (e.g. `POST /webhooks/bitpay`) that validates signature, looks up the BitPay invoice, and credits the player wallet via `walletService.deposit(userId, amount, 'bitpay', invoiceId)`. The `invoiceId` is the idempotency reference — duplicate webhooks become no-ops via wallet's existing idempotency.
+
+**Helius (Solana direct)**
+- Already signed up (key in password manager). Build whenever we're ready.
+- Env vars: `HELIUS_RPC_URL` (already have), `PAYMENT_PROVIDER=helius` for Solana-only testing
+- New file: `packages/payments/src/helius-provider.ts` implementing `PaymentProvider`
+- Factory branch: add `case 'helius'`
+- Webhook or polling: Helius can push transaction notifications or we can poll for incoming transfers to per-user deposit addresses. Decide at integration time.
+
+**Coinbase Commerce (regulated crypto backup)**
+- Signup: coinbase.com personal account first, then upgrade to Business + enable Commerce. After Atlas.
+- Env vars: `COINBASE_COMMERCE_API_KEY`, `COINBASE_COMMERCE_WEBHOOK_SECRET`
+- Pattern identical to BitPay: new `coinbase-provider.ts`, factory case, webhook handler in servers/api
+- Use as failover or regional default, not primary
+
+**NOWPayments (long-tail coin coverage)**
+- Signup: nowpayments.io, instant, free
+- Env vars: `NOWPAYMENTS_API_KEY`
+- Same pattern: new `nowpayments-provider.ts`, factory case, webhook handler
+- Use for the 300+ less-common coins BitPay doesn't support
+
+**Paysafe (primary card processor)**
+- Signup: paysafe.com/en/businesses sales, 2-6 week approval. After Atlas + business bank account.
+- Env vars: `PAYSAFE_API_KEY`, `PAYSAFE_ACCOUNT_ID`
+- New file: `packages/payments/src/paysafe-provider.ts` implementing `PaymentProvider`
+- Factory branch: `case 'paysafe'`
+- Differences from crypto: synchronous-settlement flow via hosted payment page or API; may need additional endpoints in servers/api for 3DS challenge redirects
+- Apple Pay / Google Pay come automatically through Paysafe once approved
+
+**Nuvei (backup card processor)**
+- Signup in parallel with Paysafe, same criteria. `packages/payments/src/nuvei-provider.ts`, factory case.
+
+**Jumio (KYC real provider)**
+- Signup: jumio.com sales, post-beta. Contract + integration context required.
+- Env vars: `JUMIO_API_TOKEN`, `JUMIO_API_SECRET`, `KYC_PROVIDER=jumio`
+- New file: `packages/kyc/src/jumio-provider.ts` implementing `KYCService`
+- Factory branch: `case 'jumio'` in `packages/kyc/src/kyc-service-factory.ts`
+- **Interface gap to resolve at integration time:** Jumio's verifyIdentity flow is async-pending with webhook callbacks, but the current `KYCService.verifyIdentity` returns a synchronous `VerificationResult`. At integration time, decide between: (a) return a "pending" VerificationResult immediately and update via webhook handler in servers/api, OR (b) amend the interface in packages/shared to return a pending state. Option (a) is less invasive and recommended.
+- Webhook endpoint in servers/api: `POST /webhooks/jumio` validates signature, looks up the verification session, updates the user's KYC level via the service
+
+**Elliptic (AML / blockchain analytics)**
+- Signup: elliptic.co sales, when processing real crypto volume
+- Env vars: `ELLIPTIC_API_KEY`
+- New package: `packages/aml/` with `AMLService` interface in `packages/shared/src/interfaces/aml-service.ts`. Shape like `screenAddress(address): Promise<ScreeningResult>` and `screenTransaction(txHash): Promise<ScreeningResult>`.
+- Fake-first: `FakeAMLProvider` that always returns CLEAN for dev/test
+- Real provider: `EllipticProvider`
+- Integration: called from servers/api crypto-deposit webhook BEFORE crediting wallet. If high risk, hold the deposit, flag for manual review.
+
+**Chainalysis**
+- Replaces Elliptic at scale. Same interface, new provider class. Swap via env var.
+
+**Resend (transactional email)**
+- Signup: resend.com, free tier, instant
+- Env vars: `RESEND_API_KEY`, `EMAIL_PROVIDER=resend`
+- Either: new `packages/email/` with `EmailService` interface + FakeEmailProvider + ResendProvider + factory, OR inline adapter in servers/api. New package is cleaner if email sites multiply.
+- Swap points: signup verification, password reset, match-result notifications, payout confirmations
+- Before Resend: fake provider logs to console
+
+**Sentry (error monitoring)**
+- Signup: sentry.io, free tier, instant
+- Env vars: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`
+- Bootstrap: add `Sentry.init({ dsn, environment, tracesSampleRate: 0.1 })` at top of servers/api, servers/websocket, servers/game-server entry points. Mirror in apps/web.
+- Error middleware: wrap servers/api error handler to forward uncaught errors to Sentry. Keep the existing error response shape; Sentry is observability only.
+
+**PostHog (product analytics)**
+- Signup: posthog.com, free tier, instant
+- Env vars: `POSTHOG_API_KEY`, `POSTHOG_HOST` (default https://app.posthog.com)
+- Client-side: add SDK to apps/web, initialize in root layout, track page views + key events (signup, first deposit, match join, match complete, withdrawal)
+- Server-side: add SDK to servers/api; fire events on critical business moments (deposit confirmed, match resolved, rake collected)
+
+**Cloudflare (DNS / SSL / CDN / DDoS)**
+- Signup: cloudflare.com, free tier, instant
+- Before beta deploy: move arenagaming.gg DNS from Namecheap registrar to Cloudflare
+- No code changes
+- Enables: free SSL, DDoS protection, global CDN, analytics
+- Optional later: Cloudflare Workers in front of servers/api for edge caching
+
+**Upstash Redis (queue persistence)**
+- Signup: upstash.com, free tier, when in-memory queues need to survive server restarts or multi-server deployment
+- Env vars: `REDIS_URL`, `MATCHMAKING_PROVIDER=redis` (and similar for any other in-memory state we Redis-back later)
+- New file: `packages/matchmaking/src/redis-queue.ts` — `RedisMatchQueue` class implementing the same interface as `MatchQueue` in `packages/matchmaking/src/queue.ts`
+- Factory branch: add `case 'redis'` in `packages/matchmaking/src/matchmaking-service-factory.ts` that constructs `InMemoryMatchmakingService` with a RedisMatchQueue instance
+- Other in-memory state that might migrate to Redis later: rate limiters, session cache, game-lobby presence
+
+**Plaid (ACH bank transfers)**
+- Signup: plaid.com developer account, free, instant (but production access requires compliance review)
+- Env vars: `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` (sandbox/development/production)
+- After card processor is live
+- New file: `packages/payments/src/plaid-provider.ts` implementing `PaymentProvider`
+- Factory branch: `case 'plaid'`
+- Multi-day settlement consideration: ACH takes 3-5 business days. Either hold deposits until cleared (conservative) or front the balance and claw back on NSF (higher-risk, needs fraud signal monitoring)
+
+**PayPal**
+- Post-beta, requires Curaçao license + clean track record + pre-approval from PayPal. Many months out.
+- When ready: `packages/payments/src/paypal-provider.ts`, factory case, webhook handler
+
+**MaxMind GeoIP Insights (higher-tier MaxMind product, if ever needed)**
+- Paid upgrade from GeoLite2 with better accuracy and more fraud signals. Same provider class, different data source. Single-line change to env var / db path when swapping.
 
 ## Build Roadmap
 
@@ -228,3 +355,4 @@ These estimates assume daily work, functioning AI agents, no major rewrites, and
 - Planning happens in claude.ai chats (within the Arena.gg project). Execution happens in Cursor terminal with Claude Code and Codex. README.md is the living memory between planning chats and agent sessions.
 - All code goes through Cursor agents so they can test locally before pushing. Planning chats only edit text files (this README, ARENA-GG-INFO-FILE) via GitHub connector when needed.
 - Territory rules per CLAUDE.md "Dual-Agent Coordination" section are strictly enforced.
+- When a deferred service is signed up and ready to integrate, consult the Deferred Integration Points section for exact file-level swap steps. Keep that section updated as the codebase evolves.

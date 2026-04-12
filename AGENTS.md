@@ -204,3 +204,30 @@ Rake tiers: under $1 = 10%, $1-$10 = 8%, over $10 = 5%
 - Secrets in process.env only, never in code
 - zod for API input validation
 - Structured error logging: context, userId, action, message
+## Operating Instructions (Standing Rules)
+
+These rules apply to every session and every task, unless a specific prompt overrides them.
+
+### Permissions
+
+Run Codex in Agent (full access) mode. Do not ask for approval on file edits, bash commands, or git operations. Just execute. Exception: anything destructive the user didn't ask for requires confirmation.
+
+### Database
+
+There is no live Postgres database yet. For any Prisma command that requires DATABASE_URL (validate, generate), use placeholder: `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/arena` inline on the command. Never run `prisma migrate dev`, `prisma migrate deploy`, or `prisma db push`. Migration files should be written to packages/database/prisma/migrations/ but not executed.
+
+### Commits
+
+After completing a task, update README.md to reflect the new state, then run: `git add .`, `git commit -m "<descriptive message>"`, `git push`. Do this without being prompted at the end of any task that produced file changes.
+
+### Testing
+
+If a test fails, fix the root cause. Do not weaken test assertions. Tests marked `.skip` with a comment explaining a real-DB requirement are acceptable; don't remove them.
+
+### Unknown commands / missing tools
+
+If you need a tool that isn't installed, install it. Add to package.json appropriately.
+
+### When in doubt
+
+Pick the simpler option and note your choice in the final summary. Don't pause to ask mid-task unless the decision is genuinely irreversible.

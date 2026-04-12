@@ -277,3 +277,30 @@ Rake Tiers:
 - Entry fee under $1: 10% rake
 - Entry fee $1-$10: 8% rake
 - Entry fee over $10: 5% rake
+## Operating Instructions (Standing Rules)
+
+These rules apply to every session and every task, unless a specific prompt overrides them.
+
+### Permissions
+
+Full-access permissions are configured in .claude/settings.json. Do not ask for approval on file edits, bash commands, or git operations. Just execute. The exception is anything explicitly destructive the user didn't ask for (e.g. `rm -rf`, `git push --force` on main, dropping databases) — those still require confirmation.
+
+### Database
+
+There is no live Postgres database yet. For any Prisma command that requires DATABASE_URL (validate, generate), use placeholder: `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/arena` inline on the command. Never run `prisma migrate dev`, `prisma migrate deploy`, or `prisma db push` — those require a real database connection. Migration files should be written to packages/database/prisma/migratiobut not executed.
+
+### Commits
+
+After completing a task, update README.md to reflect the new state, then run: `git add .`, `git commit -m "<descriptive message>"`, `git push`. Do this without being prompted at the end of any task that produced file changes.
+
+### Testing
+
+If a test fails, fix the root cause (usually the code, sometimes an incorrect test expectation). Do not weaken test assertions to make them pass. Tests marked `.skip` with a comment explaining a real-DB requirement are acceptable; don't remove them.
+
+### Unknown commands / missing tools
+
+If you need a tool that isn't installed (e.g. a new npm package), install it. Add it to the appropriate package.json as a dependency or devDependency depending on whether it's used at runtime or build-time.
+
+### When in doubt
+
+If a prompt doesn't specify a design choice and both options are reasonable, pick the simpler one and note your choice in the final summary. Don't pause to ask the user mid-task unless the decision would be genuinely irreversible (e.g. deleting user data, pushing to an external service).

@@ -32,14 +32,6 @@ Mark entries `[DONE]` when fully resolved. Delete after one cleanup pass confirm
 - [ ] Move MaxMind from "Accounts Deferred" to "Accounts Active Now" in README.md
 **NOTES:** See Deferred Integration Points in README.md for full swap steps. `.mmdb` file goes OUTSIDE repo.
 
-### servers/api/ built and working
-**WHEN:** REST API server is functional with auth, wallet, and matchmaking endpoints
-**THEN:**
-- [ ] Document ConflictError retry guidance in API route handlers (wallet known issue)
-- [ ] Add zod validation on all endpoints per coding conventions
-- [ ] Wire webhook endpoints for future payment/KYC providers (stub routes)
-- [ ] Update README.md "In Progress" / "What's Built" sections
-
 ### servers/game-server/ engine base classes built
 **WHEN:** RealTimeGameServer, TurnBasedGameServer, AlgorithmGameServer, ParallelGameServer base classes exist
 **THEN:**
@@ -144,4 +136,10 @@ Mark entries `[DONE]` when fully resolved. Delete after one cleanup pass confirm
 
 ## Done
 
-(none yet)
+### [DONE] servers/api/ built and working — 2026-04-12
+**WHEN:** REST API server is functional with auth, wallet, and matchmaking endpoints
+**THEN:**
+- [x] Document ConflictError retry guidance in API route handlers (wallet known issue)
+- [x] Add zod validation on all endpoints per coding conventions
+- [x] Wire webhook endpoints for future payment/KYC providers (stub routes)
+- [x] Update README.md "In Progress" / "What's Built" sections

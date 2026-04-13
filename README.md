@@ -6,7 +6,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 **Phase:** Phase 1 — Platform Core
 **Last updated:** 2026-04-12
-**Build status:** packages/shared/, packages/database/, packages/wallet/, packages/payments/, packages/kyc/, packages/geolocation/, and packages/matchmaking/ complete and stable. Wallet approved after 3 Codex audit rounds. Matchmaking approved after 2 Codex audit rounds and is production-ready for Phase 1 integration.
+**Build status:** packages/shared/, packages/database/, packages/wallet/, packages/payments/, packages/kyc/, packages/geolocation/, packages/matchmaking/, and servers/api/ complete and stable. Wallet approved after 3 Codex audit rounds. Matchmaking approved after 2 Codex audit rounds and is production-ready for Phase 1 integration. `servers/api/` is shipped and awaiting Claude Code audit.
 
 ## What's Built
 
@@ -21,17 +21,19 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - packages/kyc/ — FakeKYCProvider + createKYCService factory, in-memory per-user verification state; configurable `rejectUserIds` set and `autoApproveToLevel` knobs for simulating realistic KYC outcomes in tests; env-var gated (`KYC_PROVIDER=fake`)
 - packages/geolocation/ — FakeGeoProvider + injectable RulesSource; DEFAULT_RULES_SOURCE blocks 11 US states (AZ, AR, CT, DE, IA, LA, MT, SC, SD, TN, VT) and GB (no UKGC license). MaxMind provider NOT built yet — deferred pending ad-hoc signup; GeoComply will be its own package post-beta. Env-var gated (`GEO_PROVIDER=fake`)
 - packages/matchmaking/ — InMemoryMatchmakingService: in-memory queue with per-(gameId, entryFeeCents) buckets, compensating-transaction createMatch with entry fee deduction and automatic refund on partial failure, idempotent resolveMatch (safe to retry), injectable PayoutCalculator map (WinnerTakesAll, BattleRoyaleTopThree, Coinflip), rake tier utility (under $1 = 10%, $1–$10 = 8%, over $10 = 5%), ELO K=32 with pairwise updates. Factory gated on `MATCHMAKING_PROVIDER` env var (default "in-memory"; Redis swap point documented). 74 tests, all passing. **Codex-audited (2 rounds). Production-ready for Phase 1 integration.**
+- servers/api/ — Express REST API with dependency injection, stateless JWT auth, wallet/KYC/geolocation/matchmaking wiring, public game catalog + health endpoints, dev-only create/resolve match endpoints behind env gating, future payment/KYC webhook stubs, and 36 mocked integration tests.
 
 ## In Progress
 
-- Claude Code: idle
-- Codex: idle — ready to start `servers/api/` Stage 2
+- Claude Code: next up — audit `servers/api/`
+- Codex: idle pending Claude Code audit of `servers/api/`
 
 ## Next Up
 
-1. `servers/api/` (Codex, Stage 2)
+1. Claude Code audit of `servers/api/`
 2. `servers/websocket/` (Codex, Stage 3)
-3. Integration test: signup → deposit → queue → match → play → payout
+3. `servers/game-server/` engine base classes (Claude Code, Stage 3)
+4. Integration test: signup → deposit → queue → match → play → payout
 
 ## Blockers
 
@@ -128,6 +130,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-12:** Matchmaking audit round 1: 2 critical / 6 major / 3 minor issues found. Fixed in-package: duplicate-result validation, actual/persisted payout return values, zero-rake handling, prior-rating/current-row ELO fixes, rating-failure tolerance, integer money guards, calculator player-count guards, and queue bucket pruning. Cross-package blocker: wallet `awardPrize` idempotency gap. Suspected issues A–F verdicts: A = confirmed blocker, B = partially present and fixed, C = not present, D = not present, E = not present, F = not present (edge tests added).
 - **2026-04-12:** Wallet `awardPrize` idempotency fix landed (mirrors `collectRake` round-3 pattern exactly). Interface updated at packages/shared/ to accept optional `idempotencyKey` parameter; implementation in packages/wallet/ adds pre-create existence check with userId+type validation plus P2002 race recovery; matchmaking wires deterministic `prize-${matchId}-${userId}` keys through `resolveMatch`. This unblocks the matchmaking audit round 2.
 - **2026-04-12:** Matchmaking audit round 2: verified the round-1 blocker is definitively closed. `resolveMatch` now passes deterministic `prize-${matchId}-${userId}` keys, wallet `awardPrize` returns existing transactions without re-mutating balances on duplicate keys/P2002 races, and no other production callers omit the key. One local retry-safety gap was found and fixed in-package: `resolveMatch` now flips `Match.status` to `RESOLVED` only after `MatchPlayer` rows and ratings work finish, so post-payout persistence failures remain retryable. Added direct multi-prize retry tests plus post-payout persistence retry coverage. Residual matchmaking known issues remain only: createMatch crash reconciliation, in-memory queue persistence, and flat ELO K-factor.
+- **2026-04-12:** `servers/api/` shipped as an Express 4 app with dependency injection, stateless JWT auth, bcrypt password hashing, zod validation, request-scoped geolocation context, and explicit `withRetry` handling for caller-owned `ConflictError` retries. Added `User.passwordHash` to the Prisma schema, env-gated dev-only match create/resolve endpoints, and an async `services.ts` bootstrap that looks up seeded game IDs at boot to build the fixed-pot payout calculator map.
 
 ## Known Issues and Technical Debt
 
@@ -141,6 +144,13 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **createMatch crash during partial fee deduction needs reconciliation tooling.** If the process dies after some `deductEntryFee` calls succeed but before compensating refunds run, the match can remain `QUEUED` with some funds already moved into `MATCH_POOL`. State is recoverable because the `Match`, `MatchPlayer`, and `ENTRY_FEE` records all share the `matchId`, but there is no automated sweeper/reconciliation job yet.
 - **In-memory queue does not survive server restart.** Acceptable for Phase 1 through beta. Players in queue at crash time lose their queue position but not money (fees aren't deducted until createMatch). Swap to Redis/Upstash when multi-server or persistence is needed — swap point is packages/matchmaking/src/queue.ts.
 - **PlayerRating ELO K-factor is flat 32 regardless of games played.** Standard K=32 for all ratings. Should be refined to rating-band-aware K (e.g. K=40 for new players, K=20 for established, K=10 for top-rated) when sufficient match data justifies the tuning.
+
+### API Server
+- **Dev-only match lifecycle endpoints exist and are env-gated.** `POST /matchmaking/dev/create-match` and `POST /matchmaking/dev/resolve-match` exist only to exercise the minimum-playable flow until automatic queue-fill → match creation ships. They return 404 when `ENABLE_DEV_ENDPOINTS` is disabled in production.
+- **Signup hardcodes `User.country='US'` and `region=null`.** Real geolocation-at-signup is deferred; location enforcement currently happens at queue join via `GeoService`.
+- **No email verification flow yet.** JWT-only stateless auth is sufficient for Phase 1 minimum-playable scope; email verification is deferred to the WHEN-THEN trigger for real email provider integration.
+- **No password reset flow yet.** There is no reset-token or outbound email pipeline yet; add it when the email provider lands.
+- **Matchmaking payout calculator wiring covers fixed-pot games plus coinflip only.** Progressive-pool, house-edge, and crash games resolve through different code paths and will need dedicated route/service flows when those gameplay servers ship.
 
 ### CI / Testing
 - **No integration tests.** CI runs typecheck, build, and mocked unit tests. No end-to-end test of deposit → match → payout flow against a real database.
@@ -288,7 +298,7 @@ Realistic path from today to MVP-deployable. Each phase assumes one developer (A
 3b. MaxMind integration — sign up for GeoLite2 account, implement MaxMindProvider as new switch-case branch in geo-service-factory.ts (future, post-signup)
 4. ~~packages/matchmaking — ELO ratings, queue, skill-based pairing (Claude Code)~~ ✓ done 2026-04-12
 4b. ~~Wallet `awardPrize` idempotency fix + Codex re-audit of `packages/matchmaking/`~~ ✓ done 2026-04-12
-5. servers/api — REST endpoints, JWT auth, zod validation (Codex, Stage 2, ~2-3 hours)
+5. ~~servers/api — REST endpoints, JWT auth, zod validation (Codex, Stage 2, ~2-3 hours)~~ ✓ done 2026-04-12
 6. servers/websocket — Socket.io gateway for real-time games (Codex, ~60 min)
 7. servers/game-server — engine base classes (Real-time, Turn-based, Algorithm, Parallel) (Claude Code, ~2-3 hours)
 8. Integration test — full flow: signup → provision wallet → deposit → queue → match → play → resolve → payout (run end-to-end against local Postgres + fake providers)

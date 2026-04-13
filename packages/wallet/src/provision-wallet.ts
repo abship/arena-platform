@@ -31,6 +31,9 @@ const SYSTEM_WALLET_DEFS = [
   { userId: SYSTEM_PLATFORM_REVENUE_USER_ID, key: 'platformRevenueWalletId' as const },
 ] as const;
 
+const SYSTEM_PASSWORD_HASH =
+  '$2b$12$xejvjsLKoQG83ZdZYV.CFeSP7Uk7QRiXJRPSIL50Y/guGesKgAdgO';
+
 /**
  * Idempotently create all three system users and wallets required for double-entry
  * bookkeeping. Uses upsert to handle concurrent calls safely.
@@ -49,6 +52,7 @@ export async function provisionSystemWallets(): Promise<SystemWalletIds> {
       create: {
         id: def.userId,
         email: `${def.userId.toLowerCase()}@system.arena.gg`,
+        passwordHash: SYSTEM_PASSWORD_HASH,
         username: def.userId,
         country: 'SYSTEM',
       },

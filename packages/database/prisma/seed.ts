@@ -36,6 +36,8 @@ const TEN_CENTS = 10n;
 const ONE_DOLLAR = 100n;
 const FIVE_DOLLARS = 500n;
 const TEN_DOLLARS = 1000n;
+const SYSTEM_PASSWORD_HASH =
+  '$2b$12$xejvjsLKoQG83ZdZYV.CFeSP7Uk7QRiXJRPSIL50Y/guGesKgAdgO';
 
 const GAMES: readonly GameSeed[] = [
   {
@@ -473,9 +475,24 @@ async function seedJurisdictions(): Promise<number> {
 // Mirrors provisionSystemWallets() from @arena/wallet.
 // Inlined here because @arena/wallet depends on @arena/database (circular dep).
 const SYSTEM_WALLET_USERS = [
-  { id: 'SYSTEM_PLATFORM_SUSPENSE', email: 'system_platform_suspense@system.arena.gg', username: 'SYSTEM_PLATFORM_SUSPENSE' },
-  { id: 'SYSTEM_MATCH_POOL', email: 'system_match_pool@system.arena.gg', username: 'SYSTEM_MATCH_POOL' },
-  { id: 'SYSTEM_PLATFORM_REVENUE', email: 'system_platform_revenue@system.arena.gg', username: 'SYSTEM_PLATFORM_REVENUE' },
+  {
+    id: 'SYSTEM_PLATFORM_SUSPENSE',
+    email: 'system_platform_suspense@system.arena.gg',
+    passwordHash: SYSTEM_PASSWORD_HASH,
+    username: 'SYSTEM_PLATFORM_SUSPENSE',
+  },
+  {
+    id: 'SYSTEM_MATCH_POOL',
+    email: 'system_match_pool@system.arena.gg',
+    passwordHash: SYSTEM_PASSWORD_HASH,
+    username: 'SYSTEM_MATCH_POOL',
+  },
+  {
+    id: 'SYSTEM_PLATFORM_REVENUE',
+    email: 'system_platform_revenue@system.arena.gg',
+    passwordHash: SYSTEM_PASSWORD_HASH,
+    username: 'SYSTEM_PLATFORM_REVENUE',
+  },
 ] as const;
 
 async function seedSystemWallets(): Promise<number> {
@@ -483,7 +500,13 @@ async function seedSystemWallets(): Promise<number> {
   for (const su of SYSTEM_WALLET_USERS) {
     await prisma.user.upsert({
       where: { id: su.id },
-      create: { id: su.id, email: su.email, username: su.username, country: 'SYSTEM' },
+      create: {
+        id: su.id,
+        email: su.email,
+        passwordHash: su.passwordHash,
+        username: su.username,
+        country: 'SYSTEM',
+      },
       update: {},
     });
     await prisma.wallet.upsert({

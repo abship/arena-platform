@@ -51,6 +51,16 @@ export function requestContextMiddleware(
     return;
   }
 
+  if (
+    (latitude !== null && (latitude < -90 || latitude > 90)) ||
+    (longitude !== null && (longitude < -180 || longitude > 180))
+  ) {
+    next(new ValidationError('GPS coordinates out of range', {
+      reason: 'gps_out_of_range',
+    }));
+    return;
+  }
+
   req.requestContext = {
     ipAddress: req.ip ?? '127.0.0.1',
     gpsCoordinates:

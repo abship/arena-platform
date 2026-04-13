@@ -4,9 +4,9 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 ## Current Status
 
-**Phase:** Phase 1 — Platform Core (COMPLETE, pending first `npm run test:integration` on a Docker-enabled machine)
+**Phase:** Phase 1 — Platform Core (COMPLETE, integration test verified green)
 **Last updated:** 2026-04-12
-**Build status:** All Phase 1 packages and servers complete. Integration test harness shipped: docker-compose Postgres on port 5433 + 3 tests (happy path, idempotency, harness isolation). **Phase 1 closes when `npm run test:integration` passes green on a machine with Docker.** All mocked unit tests (174 across 8 packages) pass.
+**Build status:** All Phase 1 packages and servers complete. `npm run test:integration` verified green on local machine — all 3 integration tests pass end-to-end against docker-compose Postgres (happy path, idempotent resolveMatch, prismaReset harness isolation). Full money flow proven: signup → deposit → entry fee deduction → rake collection → prize award → payout, with correct wallet balances, match state, and double-entry ledger. All 174 mocked unit tests across 8 packages pass. Phase 1 is done — ready to start Phase 2.
 
 ## What's Built
 
@@ -138,6 +138,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-12:** Fixed seed scripts to use `findFirst` + `create`/`update` instead of `upsert` for JurisdictionConfig, because Prisma rejects `null` in compound unique keys at runtime despite TypeScript allowing it. Applies to both the production seed (`packages/database/prisma/seed.ts`) and the integration-test seed (`tests/integration/src/setup/seed.ts`).
 - **2026-04-12:** Initial Prisma migration generated via `prisma migrate diff --from-empty`. Prior incremental-only migrations folded in; a single init migration (`20260411000000_init`) now creates all Phase 1 tables, enums, indexes, and foreign keys. Redundant migrations (`add_unique_transaction_reference`, `add_user_password_hash`) removed — their changes were already in the current schema.prisma and therefore baked into the init migration.
 - **2026-04-12:** `servers/websocket/` shipped as a thin Socket.io wiring layer around `GameInstanceHost` + `StateBroadcaster`: JWT on `handshake.auth.token` (with `query.token` fallback), `match:${matchId}` room naming, broadcaster-driven player registry for join authorization (avoids growing the game-server host API), and reconnect grace via pending-leave timer map keyed by `(matchId, userId)`. 15 loopback tests, all passing.
+- **2026-04-12:** Phase 1 integration test passed green on local machine after fixing two bugs surfaced by the first real-DB run: (a) missing initial Prisma migration — only incremental `_add_unique_transaction_reference` and `_add_user_password_hash` migrations existed, no migration created the base tables; fixed by generating `20260411000000_init` via `prisma migrate diff --from-empty` and deleting the now-redundant incremental migrations, (b) seed script used `upsert` for JurisdictionConfig which Prisma rejects at runtime when nullable `region` is part of a compound unique key; fixed by switching to `findFirst` + `create`/`update` branching in both the production and integration-test seed scripts. After fixes, all 3 integration tests pass in ~5.7 seconds. Phase 1 closed.
 
 ## Known Issues and Technical Debt
 
@@ -326,7 +327,7 @@ All items shipped:
 
 ### Phase 3 — Remaining 23 Games (~5-10 days)
 
-- Engine A games (Claude Code): slitherio, diep,ker last — 3D Three.js, most complex)
+- Engine A games (Claude Code): slitherio, diep, surviv, hole, krunker (Three.js 3D, build last)
 - Engine B games (Codex): poker, blackjack, spades, rummy, war, skill-cards
 - Engine C games (Claude Code): plinko, crash, mines, dice, wheel, coinflip
 - Engine D games (Codex): tetris-duel, speed-math, trivia, typing-race, pattern-match, word-game
@@ -343,7 +344,7 @@ All items shipped:
 - Deploy to Railway with fake money enabled
 - Friends playtest
 
-**Phase 4 milestone:** Arena.gg is live on a real URL with fake money. This is where "aldev done, plugging in APIs next" kicks in.
+**Phase 4 milestone:** Arena.gg is live on a real URL with fake money. At this point the code is done and the remaining work is plugging in real-money providers.
 
 ### Post-Beta — Real Money Operations (wall-clock measured in weeks, most waiting on external approvals)
 
@@ -360,17 +361,6 @@ All items shipped:
 - UKGC after Isle of Man approval
 
 **Post-beta milestone:** Arena.gg accepts real money from US players for Tier 1/2 skill games. International launch with broader tiers when Curaçao approves.
-
-### Rough Calendar Estimate
-
-- Phase 1 complete: ~1 week from today
-- Phase 2 complete: ~1.5 weeks from today
-- Phase 3 complete: ~3 weeks f (depends on parallel cloud task throughput)
-- Phase 4 beta deployed: ~3-4 weeks from today
-- First real-money revenue (US skill games): ~2-3 months from today
-- Global launch with Curaçao: ~4-6 months from today
-
-These estimates assume daily work, functioning AI agents, no major rewrites, and no life stuff derailing momentum. Half those assumptions will break; pad accordingly.
 
 ## Notes
 

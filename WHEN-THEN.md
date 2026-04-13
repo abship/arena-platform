@@ -130,6 +130,13 @@ Mark entries `[DONE]` when fully resolved. Delete after one cleanup pass confirm
 
 ## Done
 
+### [DONE] servers/websocket/ built — 2026-04-12
+**WHEN:** Socket.io gateway is functional with JWT auth, room routing, broadcaster forwarding, and reconnect grace handling
+**THEN:**
+- [x] Update README.md build status, roadmap, and known issues
+- [x] Add websocket package to the shipped package list
+- [x] Promote the Phase 1 integration test to the top of "Next Up"
+
 ### [DONE] servers/game-server/ engine base classes built — 2026-04-12
 **WHEN:** RealTimeGameServer, TurnBasedGameServer, AlgorithmGameServer, ParallelGameServer base classes exist
 **THEN:**

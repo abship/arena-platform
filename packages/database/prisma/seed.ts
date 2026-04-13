@@ -441,30 +441,35 @@ async function seedJurisdictions(): Promise<number> {
   let count = 0;
 
   for (const jurisdiction of JURISDICTIONS) {
-    await prisma.jurisdictionConfig.upsert({
-      where: {
-        country_region: {
+    // findFirst + create/update instead of upsert because Prisma rejects
+    // null in compound unique keys at runtime.
+    const existing = await prisma.jurisdictionConfig.findFirst({
+      where: { country: jurisdiction.country, region: jurisdiction.region },
+    });
+    if (existing) {
+      await prisma.jurisdictionConfig.update({
+        where: { id: existing.id },
+        data: {
+          realMoneyEnabled: jurisdiction.realMoneyEnabled,
+          minAge: jurisdiction.minAge,
+          allowedTiers: jurisdiction.allowedTiers,
+          allowedPaymentMethods: jurisdiction.allowedPaymentMethods,
+          requiresLicense: jurisdiction.requiresLicense,
+        },
+      });
+    } else {
+      await prisma.jurisdictionConfig.create({
+        data: {
           country: jurisdiction.country,
           region: jurisdiction.region,
+          realMoneyEnabled: jurisdiction.realMoneyEnabled,
+          minAge: jurisdiction.minAge,
+          allowedTiers: jurisdiction.allowedTiers,
+          allowedPaymentMethods: jurisdiction.allowedPaymentMethods,
+          requiresLicense: jurisdiction.requiresLicense,
         },
-      },
-      update: {
-        realMoneyEnabled: jurisdiction.realMoneyEnabled,
-        minAge: jurisdiction.minAge,
-        allowedTiers: jurisdiction.allowedTiers,
-        allowedPaymentMethods: jurisdiction.allowedPaymentMethods,
-        requiresLicense: jurisdiction.requiresLicense,
-      },
-      create: {
-        country: jurisdiction.country,
-        region: jurisdiction.region,
-        realMoneyEnabled: jurisdiction.realMoneyEnabled,
-        minAge: jurisdiction.minAge,
-        allowedTiers: jurisdiction.allowedTiers,
-        allowedPaymentMethods: jurisdiction.allowedPaymentMethods,
-        requiresLicense: jurisdiction.requiresLicense,
-      },
-    });
+      });
+    }
 
     count += 1;
   }

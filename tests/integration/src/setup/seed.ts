@@ -121,30 +121,36 @@ export async function runSeed(): Promise<void> {
     });
   }
 
-  // Seed jurisdictions
+  // Seed jurisdictions — findFirst + create/update instead of upsert because
+  // Prisma rejects null in compound unique keys at runtime.
   for (const j of JURISDICTIONS) {
-    await prisma.jurisdictionConfig.upsert({
-      // Prisma's compound unique type requires `string` for region even though the
-      // column is nullable. The original seed (run via tsx) sidesteps this with
-      // looser type checking. We cast here to match that behavior.
-      where: { country_region: { country: j.country, region: j.region as string } },
-      update: {
-        realMoneyEnabled: j.realMoneyEnabled,
-        minAge: j.minAge,
-        allowedTiers: j.allowedTiers,
-        allowedPaymentMethods: j.allowedPaymentMethods,
-        requiresLicense: j.requiresLicense,
-      },
-      create: {
-        country: j.country,
-        region: j.region,
-        realMoneyEnabled: j.realMoneyEnabled,
-        minAge: j.minAge,
-        allowedTiers: j.allowedTiers,
-        allowedPaymentMethods: j.allowedPaymentMethods,
-        requiresLicense: j.requiresLicense,
-      },
+    const existing = await prisma.jurisdictionConfig.findFirst({
+      where: { country: j.country, region: j.region },
     });
+    if (existing) {
+      await prisma.jurisdictionConfig.update({
+        where: { id: existing.id },
+        data: {
+          realMoneyEnabled: j.realMoneyEnabled,
+          minAge: j.minAge,
+          allowedTiers: j.allowedTiers,
+          allowedPaymentMethods: j.allowedPaymentMethods,
+          requiresLicense: j.requiresLicense,
+        },
+      });
+    } else {
+      await prisma.jurisdictionConfig.create({
+        data: {
+          country: j.country,
+          region: j.region,
+          realMoneyEnabled: j.realMoneyEnabled,
+          minAge: j.minAge,
+          allowedTiers: j.allowedTiers,
+          allowedPaymentMethods: j.allowedPaymentMethods,
+          requiresLicense: j.requiresLicense,
+        },
+      });
+    }
   }
 
   // Seed system wallets

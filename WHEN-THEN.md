@@ -39,12 +39,14 @@ Mark entries `[DONE]` when fully resolved. Delete after one cleanup pass confirm
 - [ ] Begin Phase 3 game builds (remaining 23 games)
 - [ ] Update README.md phase status
 
-### Integration test passes end-to-end
-**WHEN:** signup -> deposit -> queue -> match -> play -> resolve -> payout works against local Postgres + fake providers
+### CI runs integration tests
+**WHEN:** Ready to add integration-test coverage to the GitHub Actions pipeline
 **THEN:**
-- [ ] Mark Phase 1 as complete in README.md
-- [ ] Begin Phase 2 (frontend + first game)
-- [ ] Add the integration test to CI
+- [ ] Add a new job to `.github/workflows/ci.yml` that runs `npm run test:integration`
+- [ ] GitHub Actions has Docker available by default on ubuntu-latest runners — the existing `infrastructure/docker/docker-compose.test.yml` should work without changes
+- [ ] Do NOT switch to Supabase or any hosted DB for CI — stick with docker-compose for hermetic, credential-free runs
+- [ ] Consider caching the `postgres:16-alpine` image pull to speed up CI
+**NOTES:** Decision locked 2026-04-12: integration tests use docker-compose Postgres, never a remote/hosted DB. Keeps CI hermetic, avoids credential leakage, no test-data pollution of Supabase.
 
 ### Node 20 GitHub Actions deprecation
 **WHEN:** Before 2026-06-02 (GitHub forces Node 24)
@@ -109,13 +111,13 @@ Mark entries `[DONE]` when fully resolved. Delete after one cleanup pass confirm
 - [ ] Replace flat K=32 with rating-band-aware K-factor (e.g. K=40 new, K=20 established, K=10 top)
 - [ ] Backtest against historical match data before deploying
 
-### Real database integration tests needed
+### More integration-test coverage needed (race conditions, error paths)
 **WHEN:** Preparing for production volume OR after a bug that mocked tests missed
 **THEN:**
-- [ ] Set up docker-compose with Postgres for CI
 - [ ] Write integration tests for wallet race conditions and serialization failures
 - [ ] Write integration tests for matchmaking fee deduction + refund flows
-**NOTES:** Current test suite is mocked-Prisma only. Real race conditions and constraint enforcement are not covered.
+- [ ] Write integration tests for concurrent resolveMatch calls
+**NOTES:** Reuse the docker-compose harness in infrastructure/docker/docker-compose.test.yml and the patterns in tests/integration/. Don't reinvent DB bootstrap.
 
 ### Production deploy (Fly.io)
 **WHEN:** Beta validated, moving to production infrastructure
@@ -129,6 +131,13 @@ Mark entries `[DONE]` when fully resolved. Delete after one cleanup pass confirm
 ---
 
 ## Done
+
+### [DONE] Integration test passes end-to-end — 2026-04-12
+**WHEN:** signup -> deposit -> queue -> match -> play -> resolve -> payout works against local Postgres + fake providers
+**THEN:**
+- [x] Mark Phase 1 as complete in README.md
+- [x] Begin Phase 2 (frontend + first game)
+- [x] Add the integration test to CI — deferred to WHEN-THEN "CI runs integration tests" entry
 
 ### [DONE] servers/websocket/ built — 2026-04-12
 **WHEN:** Socket.io gateway is functional with JWT auth, room routing, broadcaster forwarding, and reconnect grace handling

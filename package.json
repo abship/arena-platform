@@ -6,14 +6,16 @@
     "apps/*",
     "packages/*",
     "servers/*",
-    "games/*"
+    "games/*",
+    "tests/*"
   ],
   "scripts": {
     "dev": "turbo dev",
     "build": "turbo build",
     "test": "turbo test",
     "lint": "turbo lint",
-    "clean": "turbo clean"
+    "clean": "turbo clean",
+    "test:integration": "docker compose -f infrastructure/docker/docker-compose.test.yml up -d --wait && DATABASE_URL=postgresql://arena:arena@localhost:5433/arena_test npm run test:integration -w @arena/integration-test; EXIT=$?; docker compose -f infrastructure/docker/docker-compose.test.yml down -v; exit $EXIT"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

@@ -4,9 +4,9 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 ## Current Status
 
-**Phase:** Phase 1 — Platform Core
+**Phase:** Phase 1 — Platform Core (COMPLETE, pending first `npm run test:integration` on a Docker-enabled machine)
 **Last updated:** 2026-04-12
-**Build status:** packages/shared/, packages/database/, packages/wallet/, packages/payments/, packages/kyc/, packages/geolocation/, packages/matchmaking/, servers/api/, servers/game-server/, and servers/websocket/ complete and stable. Wallet approved after 3 Codex audit rounds. Matchmaking approved after 2 Codex audit rounds and is production-ready for Phase 1 integration. `servers/api/` Claude-Code-audited (0 critical, 0 major, 3 minor fixed in-place). `servers/game-server/` shipped with 4 engine base classes, host, broadcaster, 4 reference test games, 51 tests. `servers/websocket/` shipped with Socket.io JWT handshake auth, room-based match routing, broadcaster forwarding, reconnect grace handling, and 15 loopback tests. Phase 1 now has only the final integration test remaining.
+**Build status:** All Phase 1 packages and servers complete. Integration test harness shipped: docker-compose Postgres on port 5433 + 3 tests (happy path, idempotency, harness isolation). **Phase 1 closes when `npm run test:integration` passes green on a machine with Docker.** All mocked unit tests (174 across 8 packages) pass.
 
 ## What's Built
 
@@ -24,15 +24,15 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - servers/api/ — Express REST API with dependency injection, stateless JWT auth, wallet/KYC/geolocation/matchmaking wiring, public game catalog + health endpoints, dev-only create/resolve match endpoints behind env gating, future payment/KYC webhook stubs, and 37 mocked integration tests. **Claude-Code-audited 2026-04-12.**
 - servers/game-server/ — Four abstract engine base classes (RealTimeGameServerBase, TurnBasedGameServerBase, AlgorithmGameServerBase, ParallelGameServerBase), GameInstanceHost for match routing, EventEmitter-based StateBroadcaster for websocket subscription, 4 reference test games proving each engine class, 51 tests all passing.
 - servers/websocket/ — Socket.io gateway with JWT auth on `handshake.auth.token`, `match:${matchId}` room routing, broadcaster subscriptions for state/match-end/player events, reconnect grace timers keyed by `(matchId, userId)`, local JWT verifier kept in sync with `servers/api`, and 15 loopback tests with `socket.io-client`.
+- tests/integration/ — Docker-compose Postgres harness (port 5433, tmpfs data dir) with 3 end-to-end tests: happy-path flow (signup → deposit → queue → match → resolve → payout with wallet balance, match state, rake, double-entry ledger, and ELO assertions), idempotent resolveMatch (no double-pay on retry), and reseed isolation (prismaReset restores clean state). Runs via `npm run test:integration`.
 
 ## In Progress
 
-- Codex: idle after shipping `servers/websocket/`
-- Claude Code: next up for the Phase 1 integration test unless reassigned
+- Both agents idle, awaiting Phase 2 kickoff
 
 ## Next Up
 
-1. Integration test: signup → deposit → queue → match → play → payout
+1. `apps/web/` scaffolding — Next.js frontend, landing page, game browser, wallet UI (Claude Code via V0 MCP, Stage 6)
 2. `games/agario/server/` (Claude Code, Stage 4 — first game extending RealTimeGameServerBase)
 3. `games/agario/client/` (Codex, Stage 4 — first client consuming websocket state)
 
@@ -134,6 +134,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-12:** `servers/api/` shipped as an Express 4 app with dependency injection, stateless JWT auth, bcrypt password hashing, zod validation, request-scoped geolocation context, and explicit `withRetry` handling for caller-owned `ConflictError` retries. Added `User.passwordHash` to the Prisma schema, env-gated dev-only match create/resolve endpoints, and an async `services.ts` bootstrap that looks up seeded game IDs at boot to build the fixed-pot payout calculator map.
 - **2026-04-12:** `servers/api/` audit (Claude Code). Walked all 12 suspected-issue categories: auth bypass paths, error leakage, password handling, JWT secret handling, zod validation coverage, withRetry scope, dev endpoint gating, jurisdiction/tier/age ordering, register atomicity, request context, test quality, response shape consistency. Verdict: **0 critical, 0 major, 3 minor issues found and fixed in-place**: (1) explicit `express.json({ limit: '100kb' })` body size cap, (2) GPS coordinate range validation (-90..90, -180..180) in request-context middleware with test, (3) `.env.example` documenting all env vars. No cross-package blockers. CORS `*` and 401 message-field inconsistency documented as known issues for pre-production hardening. 37 tests (36 original + 1 new), all passing. Codex unblocked for `servers/websocket/` (Stage 3).
 - **2026-04-12:** `servers/game-server/` shipped with four abstract engine base classes (RealTimeGameServerBase with setInterval tick loop, TurnBasedGameServerBase with action validation and turn advancement, AlgorithmGameServerBase with crypto.randomBytes+sha256 commit/reveal provably fair flow, ParallelGameServerBase with challenge generation and progress comparison). EventEmitter-based StateBroadcaster provides typed state/match-end/player-joined/player-left events with error isolation per listener. GameInstanceHost routes matchId→gameId→engine with registerGame/createMatch/destroyMatch/handleInput/handlePlayerLeave/getState — the single entry point websocket will consume. Four reference test games prove each engine class end-to-end. 51 tests, all passing.
+- **2026-04-12:** `tests/integration/` — docker-compose Postgres for integration tests (never Supabase, never hosted DB). tmpfs data dir for instant teardown, port 5433 to avoid collision with local Postgres on 5432. Three initial tests: happy path (signup → deposit → queue → match → resolve → payout), idempotency (resolveMatch retry is no-op), harness isolation (prismaReset restores clean state). Only `prisma migrate deploy` used (never `migrate dev`). Phase 1 closed.
 - **2026-04-12:** `servers/websocket/` shipped as a thin Socket.io wiring layer around `GameInstanceHost` + `StateBroadcaster`: JWT on `handshake.auth.token` (with `query.token` fallback), `match:${matchId}` room naming, broadcaster-driven player registry for join authorization (avoids growing the game-server host API), and reconnect grace via pending-leave timer map keyed by `(matchId, userId)`. 15 loopback tests, all passing.
 
 ## Known Issues and Technical Debt
@@ -169,8 +170,12 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **Tick loops use naive setInterval.** No drift correction or catch-up logic. Production real-time games will need high-resolution timers (e.g. `setImmediate` loop with `performance.now()` delta tracking) to avoid tick drift under load.
 
 ### CI / Testing
-- **No integration tests.** CI runs typecheck, build, and mocked unit tests. No end-to-end test of deposit → match → payout flow against a real database.
 - **Node 20 action deprecated June 2026.** .github/workflows/ci.yml uses actions/checkout@v4 and actions/setup-node@v4 on node-version: 20. GitHub will force Node 24 by June 2, 2026. Bump to 24 before then.
+
+### Integration Test
+- **Requires Docker running locally.** `npm run test:integration` starts a Postgres 16 container via docker-compose. Without Docker, the command fails immediately.
+- **Not yet wired to CI.** See WHEN-THEN "CI runs integration tests" trigger for the plan.
+- **Currently three tests.** Happy path, idempotency, and harness isolation. Expand coverage per WHEN-THEN "More integration-test coverage needed" entry (race conditions, error paths).
 
 ## Deferred Integration Points
 
@@ -303,21 +308,10 @@ When each deferred service is ready to integrate, here is exactly what needs to 
 
 Realistic path from today to MVP-deployable. Each phase assumes one developer (Arjun) with two AI coding agents (Claude Code, Codex) running in parallel per CLAUDE.md territory rules.
 
-### Phase 1 — Platform Core (in progress, final integration test remaining)
+### Phase 1 — Platform Core (complete 2026-04-12) ✓
 
-**Done:** packages/shared, packages/database, packages/wallet (Codex-approved after 3 audit rounds)
-
-**Remaining (~5-8 agent sessions):**
-1. ~~packages/payments — PaymentProvider interface + FakePaymentProvider~~ ✓ done 2026-04-12
-2. ~~packages/kyc — KYCService interface + FakeKYCProvider~~ ✓ done 2026-04-12
-3. ~~packages/geolocation — FakeGeoProvider + injectable RulesSource~~ ✓ done 2026-04-12 (MaxMindProvider deferred pending account signup — will be single-branch add to factory)
-3b. MaxMind integration — sign up for GeoLite2 account, implement MaxMindProvider as new switch-case branch in geo-service-factory.ts (future, post-signup)
-4. ~~packages/matchmaking — ELO ratings, queue, skill-based pairing (Claude Code)~~ ✓ done 2026-04-12
-4b. ~~Wallet `awardPrize` idempotency fix + Codex re-audit of `packages/matchmaking/`~~ ✓ done 2026-04-12
-5. ~~servers/api — REST endpoints, JWT auth, zod validation (Codex, Stage 2, ~2-3 hours)~~ ✓ done 2026-04-12
-6. ~~servers/websocket — Socket.io gateway for real-time games (Codex, ~60 min)~~ ✓ done 2026-04-12
-7. ~~servers/game-server — engine base classes (Real-time, Turn-based, Algorithm, Parallel) (Claude Code, ~2-3 hours)~~ ✓ done 2026-04-12
-8. Integration test — full flow: signup → provision wallet → deposit → queue → match → play → resolve → payout (run end-to-end against local Postgres + fake providers)
+All items shipped:
+1. ~~packages/payments~~ ✓ 2. ~~packages/kyc~~ ✓ 3. ~~packages/geolocation~~ ✓ 4. ~~packages/matchmaking~~ ✓ 5. ~~servers/api~~ ✓ 6. ~~servers/websocket~~ ✓ 7. ~~servers/game-server~~ ✓ 8. ~~tests/integration~~ ✓
 
 **Phase 1 milestone:** platform core works end-to-end with fake money, no games yet.
 

@@ -32,12 +32,6 @@ Mark entries `[DONE]` when fully resolved. Delete after one cleanup pass confirm
 - [ ] Move MaxMind from "Accounts Deferred" to "Accounts Active Now" in README.md
 **NOTES:** See Deferred Integration Points in README.md for full swap steps. `.mmdb` file goes OUTSIDE repo.
 
-### servers/game-server/ engine base classes built
-**WHEN:** RealTimeGameServer, TurnBasedGameServer, AlgorithmGameServer, ParallelGameServer base classes exist
-**THEN:**
-- [ ] Begin `games/agario/server/` (first game, reference implementation)
-- [ ] Update README.md build status
-
 ### First game (agario) playable end-to-end
 **WHEN:** agario server + client work together through matchmaking with fake money
 **THEN:**
@@ -135,6 +129,12 @@ Mark entries `[DONE]` when fully resolved. Delete after one cleanup pass confirm
 ---
 
 ## Done
+
+### [DONE] servers/game-server/ engine base classes built — 2026-04-12
+**WHEN:** RealTimeGameServer, TurnBasedGameServer, AlgorithmGameServer, ParallelGameServer base classes exist
+**THEN:**
+- [x] Begin `games/agario/server/` (first game, reference implementation) — unblocked, ready for Stage 4
+- [x] Update README.md build status
 
 ### [DONE] servers/api/ built and working — 2026-04-12
 **WHEN:** REST API server is functional with auth, wallet, and matchmaking endpoints

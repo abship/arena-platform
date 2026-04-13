@@ -6,7 +6,7 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 
 **Phase:** Phase 1 — Platform Core
 **Last updated:** 2026-04-12
-**Build status:** packages/shared/, packages/database/, packages/wallet/, packages/payments/, packages/kyc/, packages/geolocation/, packages/matchmaking/, and servers/api/ complete and stable. Wallet approved after 3 Codex audit rounds. Matchmaking approved after 2 Codex audit rounds and is production-ready for Phase 1 integration. `servers/api/` Claude-Code-audited (0 critical, 0 major, 3 minor fixed in-place). Codex ready for `servers/websocket/` (Stage 3).
+**Build status:** packages/shared/, packages/database/, packages/wallet/, packages/payments/, packages/kyc/, packages/geolocation/, packages/matchmaking/, servers/api/, and servers/game-server/ complete and stable. Wallet approved after 3 Codex audit rounds. Matchmaking approved after 2 Codex audit rounds and is production-ready for Phase 1 integration. `servers/api/` Claude-Code-audited (0 critical, 0 major, 3 minor fixed in-place). `servers/game-server/` shipped with 4 engine base classes, host, broadcaster, 4 reference test games, 51 tests. Codex unblocked for `servers/websocket/` (Stage 3).
 
 ## What's Built
 
@@ -22,17 +22,18 @@ Arena.gg — a Roblox-style platform where anyone can build, publish, and profit
 - packages/geolocation/ — FakeGeoProvider + injectable RulesSource; DEFAULT_RULES_SOURCE blocks 11 US states (AZ, AR, CT, DE, IA, LA, MT, SC, SD, TN, VT) and GB (no UKGC license). MaxMind provider NOT built yet — deferred pending ad-hoc signup; GeoComply will be its own package post-beta. Env-var gated (`GEO_PROVIDER=fake`)
 - packages/matchmaking/ — InMemoryMatchmakingService: in-memory queue with per-(gameId, entryFeeCents) buckets, compensating-transaction createMatch with entry fee deduction and automatic refund on partial failure, idempotent resolveMatch (safe to retry), injectable PayoutCalculator map (WinnerTakesAll, BattleRoyaleTopThree, Coinflip), rake tier utility (under $1 = 10%, $1–$10 = 8%, over $10 = 5%), ELO K=32 with pairwise updates. Factory gated on `MATCHMAKING_PROVIDER` env var (default "in-memory"; Redis swap point documented). 74 tests, all passing. **Codex-audited (2 rounds). Production-ready for Phase 1 integration.**
 - servers/api/ — Express REST API with dependency injection, stateless JWT auth, wallet/KYC/geolocation/matchmaking wiring, public game catalog + health endpoints, dev-only create/resolve match endpoints behind env gating, future payment/KYC webhook stubs, and 37 mocked integration tests. **Claude-Code-audited 2026-04-12.**
+- servers/game-server/ — Four abstract engine base classes (RealTimeGameServerBase, TurnBasedGameServerBase, AlgorithmGameServerBase, ParallelGameServerBase), GameInstanceHost for match routing, EventEmitter-based StateBroadcaster for websocket subscription, 4 reference test games proving each engine class, 51 tests all passing.
 
 ## In Progress
 
-- Codex: ready for `servers/websocket/` (Stage 3)
-- Claude Code: ready for `servers/game-server/` engine base classes (Stage 3)
+- Codex: unblocked for `servers/websocket/` (Stage 3) — consumes GameInstanceHost and StateBroadcaster from `servers/game-server/`
+- Claude Code: idle, available for next task
 
 ## Next Up
 
 1. `servers/websocket/` (Codex, Stage 3)
-2. `servers/game-server/` engine base classes (Claude Code, Stage 3)
-3. Integration test: signup → deposit → queue → match → play → payout
+2. Integration test: signup → deposit → queue → match → play → payout
+3. `games/agario/server/` (Claude Code, Stage 4 — first game extending RealTimeGameServerBase)
 
 ## Blockers
 
@@ -131,6 +132,7 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **2026-04-12:** Matchmaking audit round 2: verified the round-1 blocker is definitively closed. `resolveMatch` now passes deterministic `prize-${matchId}-${userId}` keys, wallet `awardPrize` returns existing transactions without re-mutating balances on duplicate keys/P2002 races, and no other production callers omit the key. One local retry-safety gap was found and fixed in-package: `resolveMatch` now flips `Match.status` to `RESOLVED` only after `MatchPlayer` rows and ratings work finish, so post-payout persistence failures remain retryable. Added direct multi-prize retry tests plus post-payout persistence retry coverage. Residual matchmaking known issues remain only: createMatch crash reconciliation, in-memory queue persistence, and flat ELO K-factor.
 - **2026-04-12:** `servers/api/` shipped as an Express 4 app with dependency injection, stateless JWT auth, bcrypt password hashing, zod validation, request-scoped geolocation context, and explicit `withRetry` handling for caller-owned `ConflictError` retries. Added `User.passwordHash` to the Prisma schema, env-gated dev-only match create/resolve endpoints, and an async `services.ts` bootstrap that looks up seeded game IDs at boot to build the fixed-pot payout calculator map.
 - **2026-04-12:** `servers/api/` audit (Claude Code). Walked all 12 suspected-issue categories: auth bypass paths, error leakage, password handling, JWT secret handling, zod validation coverage, withRetry scope, dev endpoint gating, jurisdiction/tier/age ordering, register atomicity, request context, test quality, response shape consistency. Verdict: **0 critical, 0 major, 3 minor issues found and fixed in-place**: (1) explicit `express.json({ limit: '100kb' })` body size cap, (2) GPS coordinate range validation (-90..90, -180..180) in request-context middleware with test, (3) `.env.example` documenting all env vars. No cross-package blockers. CORS `*` and 401 message-field inconsistency documented as known issues for pre-production hardening. 37 tests (36 original + 1 new), all passing. Codex unblocked for `servers/websocket/` (Stage 3).
+- **2026-04-12:** `servers/game-server/` shipped with four abstract engine base classes (RealTimeGameServerBase with setInterval tick loop, TurnBasedGameServerBase with action validation and turn advancement, AlgorithmGameServerBase with crypto.randomBytes+sha256 commit/reveal provably fair flow, ParallelGameServerBase with challenge generation and progress comparison). EventEmitter-based StateBroadcaster provides typed state/match-end/player-joined/player-left events with error isolation per listener. GameInstanceHost routes matchId→gameId→engine with registerGame/createMatch/destroyMatch/handleInput/handlePlayerLeave/getState — the single entry point websocket will consume. Four reference test games prove each engine class end-to-end. 51 tests, all passing.
 
 ## Known Issues and Technical Debt
 
@@ -153,6 +155,11 @@ Sign up in the moment the agent needs the API key during integration. No point s
 - **Matchmaking payout calculator wiring covers fixed-pot games plus coinflip only.** Progressive-pool, house-edge, and crash games resolve through different code paths and will need dedicated route/service flows when those gameplay servers ship.
 - **CORS allows all origins.** `cors()` with no config is fine for dev/Phase 1 but must be restricted to the actual frontend origin(s) before production deployment.
 - **401 responses omit `message` field.** All other error responses include `{ error, message, context? }` but 401 from auth middleware returns only `{ error: 'UNAUTHORIZED' }`. Cosmetic inconsistency; fix when standardizing the API error contract.
+
+### Game Server Package
+- **No persistence of game state.** Instances are in-memory only — a server crash loses all active matches. Acceptable for Phase 1 through beta; production game-server deployments will need state snapshots or Redis-backed state.
+- **Host is single-process.** No horizontal scaling — one process hosts all game instances. Same constraint as the matchmaking in-memory queue; Redis-backed host is future work.
+- **Tick loops use naive setInterval.** No drift correction or catch-up logic. Production real-time games will need high-resolution timers (e.g. `setImmediate` loop with `performance.now()` delta tracking) to avoid tick drift under load.
 
 ### CI / Testing
 - **No integration tests.** CI runs typecheck, build, and mocked unit tests. No end-to-end test of deposit → match → payout flow against a real database.
@@ -302,7 +309,7 @@ Realistic path from today to MVP-deployable. Each phase assumes one developer (A
 4b. ~~Wallet `awardPrize` idempotency fix + Codex re-audit of `packages/matchmaking/`~~ ✓ done 2026-04-12
 5. ~~servers/api — REST endpoints, JWT auth, zod validation (Codex, Stage 2, ~2-3 hours)~~ ✓ done 2026-04-12
 6. servers/websocket — Socket.io gateway for real-time games (Codex, ~60 min)
-7. servers/game-server — engine base classes (Real-time, Turn-based, Algorithm, Parallel) (Claude Code, ~2-3 hours)
+7. ~~servers/game-server — engine base classes (Real-time, Turn-based, Algorithm, Parallel) (Claude Code, ~2-3 hours)~~ ✓ done 2026-04-12
 8. Integration test — full flow: signup → provision wallet → deposit → queue → match → play → resolve → payout (run end-to-end against local Postgres + fake providers)
 
 **Phase 1 milestone:** platform core works end-to-end with fake money, no games yet.
